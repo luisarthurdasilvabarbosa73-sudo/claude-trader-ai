@@ -1,0 +1,130 @@
+# CLAUDE TRADER AI — automação no GitHub (tudo pelo navegador, sem computador).
+#
+# 1) Ao enviar "claude-trader-ai.zip" para o repositório, este fluxo descompacta
+#    o projeto e faz o commit dos arquivos automaticamente.
+# 2) Em seguida roda os testes do robô, compila o app e valida a imagem Docker.
+# 3) Manualmente (aba Actions > "Run workflow"), roda um BACKTEST com dados reais.
+name: CLAUDE TRADER AI
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      tarefa:
+        description: "O que executar"
+        type: choice
+        options: [testes, backtest]
+        default: testes
+      simbolos:
+        description: "Pares para o backtest"
+        default: "SOLUSDT,XRPUSDT,ADAUSDT"
+      inicio:
+        description: "Início do backtest (AAAA-MM-DD)"
+        default: "2026-08-01"
+      fim:
+        description: "Fim do backtest (AAAA-MM-DD)"
+        default: "2026-10-31"
+      capital:
+        description: "Capital inicial em R$"
+        default: "30"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cta-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  descompactar:
+    runs-on: ubuntu-latest
+    outputs:
+      pronto: ${{ steps.verifica.outputs.pronto }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Descompactar projeto enviado (.zip)
+        run: |
+          if [ -f claude-trader-ai.zip ]; then
+            unzip -o claude-trader-ai.zip -d .
+            rm -f claude-trader-ai.zip
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "Projeto CLAUDE TRADER AI descompactado" || echo "Nada novo para salvar"
+            git push
+          else
+            echo "Nenhum .zip para descompactar."
+          fi
+      - name: Verificar se o projeto já está no repositório
+        id: verifica
+        run: |
+          if [ -f backend/requirements.txt ]; then echo "pronto=true" >> "$GITHUB_OUTPUT";
+          else echo "pronto=false" >> "$GITHUB_OUTPUT"; echo "Envie o claude-trader-ai.zip (Passo 3)."; fi
+
+  testes-backend:
+    needs: descompactar
+    if: ${{ needs.descompactar.outputs.pronto == 'true' && inputs.tarefa != 'backtest' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar dependências
+        run: pip install -r backend/requirements-dev.txt
+      - name: Rodar testes automatizados
+        working-directory: backend
+        run: python -m pytest -q -rs
+
+  build-app:
+    needs: descompactar
+    if: ${{ needs.descompactar.outputs.pronto == 'true' && inputs.tarefa != 'backtest' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Verificar tipos e compilar o PWA
+        working-directory: frontend
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+
+  docker:
+    needs: [testes-backend, build-app]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - name: Montar a imagem Docker de produção
+        run: docker build -t claude-trader-ai .
+
+  backtest:
+    needs: descompactar
+    if: ${{ needs.descompactar.outputs.pronto == 'true' && github.event_name == 'workflow_dispatch' && inputs.tarefa == 'backtest' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r backend/requirements.txt
+      - name: Backtest com dados históricos reais da Binance
+        working-directory: backend
+        run: |
+          python scripts/backtest.py --symbols "${{ inputs.simbolos }}" --start "${{ inputs.inicio }}" --end "${{ inputs.fim }}" --capital-brl "${{ inputs.capital }}"
+          cat reports/*.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: relatorio-backtest
+          path: backend/reports/

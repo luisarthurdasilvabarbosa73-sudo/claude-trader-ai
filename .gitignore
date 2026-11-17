@@ -1,0 +1,16 @@
+# Segredos — NUNCA versionar
+.env
+*.env
+!.env.example
+
+# Gerados
+node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+backend/data/
+backend/reports/
+*.db
+*.db-wal
+*.db-shm
