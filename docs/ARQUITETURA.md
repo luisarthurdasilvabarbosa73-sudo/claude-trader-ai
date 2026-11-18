@@ -34,6 +34,9 @@ do Android. O app é publicado de graça no GitHub Pages e instalado na tela ini
 - **Dinheiro real** exigirá revisar esta arquitetura: a regra do projeto proíbe guardar a chave da
   Binance no aparelho. O `backend/` (FastAPI) continua no repositório como base para um servidor futuro.
 
-## Separação simulação × execução real
-O app só contém o simulador (`paper.ts`). Não existe código de envio de ordens reais no app.
+## Separação simulação × Testnet × real
+- `paper.ts`: simulação, não envia nada a lugar nenhum.
+- `testnet.ts` + `signed.ts`: ordens assinadas (HMAC-SHA256 via Web Crypto) pela API WebSocket da
+  **Testnet** (`wss://ws-api.testnet.binance.vision`). O endereço é fixo no código.
+- **Não existe código de negociação na conta real.** A chave da Testnet fica só no aparelho.
 No `backend/`, `execution/live.py` continua travado por `TESTNET_RELEASED`/`REAL_RELEASED = False`.

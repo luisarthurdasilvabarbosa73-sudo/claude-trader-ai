@@ -28,7 +28,7 @@ test("backtest do app reproduz as operações do motor Python", { skip: !existsS
   });
 });
 
-test("motor do app decide igual ao motor Python de referência", { skip: !existsSync(FIXTURE) && "fixture ausente" }, () => {
+test("motor do app decide igual ao motor Python de referência", { skip: !existsSync(FIXTURE) && "fixture ausente" }, async () => {
   const fx = JSON.parse(readFileSync(FIXTURE, "utf8"));
   const series: Record<string, Candle[]> = {};
   for (const [s, rows] of Object.entries(fx.candles as Record<string, number[][]>)) {
@@ -42,7 +42,7 @@ test("motor do app decide igual ao motor Python de referência", { skip: !exists
   const eng = new TradingEngine({ ...DEFAULT_CONFIG, symbols: Object.keys(series), initialCapitalBrl: fx.initial_brl }, repo, m,
     { clock: () => m.now });
   eng.start(series[m.symbols[0]][fx.warmup].openTime / 1000);
-  for (let i = fx.warmup; i < m.length; i++) replayCandle(m, eng, i);
+  for (let i = fx.warmup; i < m.length; i++) await replayCandle(m, eng, i);
 
   const ours = repo.recentDecisions(100_000).reverse();
   assert.equal(ours.length, fx.decisions.length, "quantidade de decisões");

@@ -57,76 +57,113 @@ export function parseKline(r: any[], nowMs: number): Candle {
     quoteVolume: +r[7], trades: Number(r[8]), closed: closeTime < nowMs };
 }
 
-const REST_HOSTS = ["https://data-api.binance.vision", "https://api.binance.com", "https://api-gcp.binance.com"];
-const WS_URL = "wss://data-stream.binance.vision";
-const WS_API_URL = "wss://ws-api.binance.com:443/ws-api/v3";
+export class GeoBlocked extends Error {}
+/** A Binance respondeu e recusou o pedido (ex.: par inexistente). Não adianta tentar outro caminho. */
+export class DataRejected extends Error {
+  code: number | undefined;
+  constructor(msg: string, code?: number) { super(msg); this.code = code; }
+}
+
+/** Endereços oficiais por ambiente. */
+export interface Env { name: "mainnet" | "testnet"; restHosts: string[]; wsApiUrl: string; streamBase: string }
+
+export const MAINNET: Env = {
+  name: "mainnet",
+  restHosts: ["https://data-api.binance.vision", "https://api.binance.com", "https://api-gcp.binance.com"],
+  wsApiUrl: "wss://ws-api.binance.com:443/ws-api/v3",
+  streamBase: "wss://data-stream.binance.vision",
+};
+
+export const TESTNET: Env = {
+  name: "testnet",
+  restHosts: ["https://testnet.binance.vision", "https://api1.testnet.binance.vision"],
+  wsApiUrl: "wss://ws-api.testnet.binance.vision/ws-api/v3",
+  streamBase: "wss://stream.testnet.binance.vision",
+};
+
 const WS_API_METHOD: Record<string, string> = {
   "/api/v3/exchangeInfo": "exchangeInfo", "/api/v3/klines": "klines", "/api/v3/ticker/bookTicker": "ticker.book",
 };
 
-export class GeoBlocked extends Error {}
-
-/** Cliente de dados públicos da Binance: REST (com hosts reserva) e, se o navegador bloquear,
+/** Cliente de dados PÚBLICOS: REST (com hosts reserva) e, se o navegador bloquear,
  *  plano B pela API WebSocket oficial. Usado pelo robô ao vivo e pelo backtest. */
-export const client = { useWsApi: false, hostIndex: 0 };
+export class DataClient {
+  env: Env;
+  useWsApi = false;
+  hostIndex = 0;
+  constructor(env: Env) { this.env = env; }
 
-function wsApi(path: string, params: Record<string, string | number>): Promise<unknown> {
-  const method = WS_API_METHOD[path];
-  const p: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(params)) p[k] = k === "symbols" ? JSON.parse(String(v)) : v;
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(WS_API_URL);
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const timer = setTimeout(() => { ws.close(); reject(new Error("tempo esgotado na API WebSocket")); }, 15_000);
-    ws.onopen = () => ws.send(JSON.stringify({ id, method, params: p }));
-    ws.onmessage = (ev) => {
-      const msg = JSON.parse(String(ev.data));
-      if (msg.id !== id) return;
-      clearTimeout(timer);
-      ws.close();
-      if (msg.status === 451) reject(new GeoBlocked("A Binance bloqueou o acesso a partir da sua localização (HTTP 451)."));
-      else if (msg.status === 200) resolve(msg.result);
-      else reject(new Error(msg.error?.msg ?? `API WebSocket respondeu ${msg.status}`));
-    };
-    ws.onerror = () => { clearTimeout(timer); reject(new Error("falha na API WebSocket")); };
-  });
-}
+  private wsApi(path: string, params: Record<string, string | number>): Promise<unknown> {
+    const method = WS_API_METHOD[path];
+    const p: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(params)) p[k] = k === "symbols" ? JSON.parse(String(v)) : v;
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(this.env.wsApiUrl);
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const timer = setTimeout(() => { ws.close(); reject(new Error("tempo esgotado na API WebSocket")); }, 15_000);
+      ws.onopen = () => ws.send(JSON.stringify({ id, method, params: p }));
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(String(ev.data));
+        if (msg.id !== id) return;
+        clearTimeout(timer);
+        ws.close();
+        if (msg.status === 451) reject(new GeoBlocked("A Binance bloqueou o acesso a partir da sua localização (HTTP 451)."));
+        else if (msg.status === 200) resolve(msg.result);
+        else if (msg.status === 400) reject(new DataRejected(`Binance recusou: ${msg.error?.msg ?? msg.status}`, msg.error?.code));
+        else reject(new Error(msg.error?.msg ?? `API WebSocket respondeu ${msg.status}`));
+      };
+      ws.onerror = () => { clearTimeout(timer); reject(new Error("falha na API WebSocket")); };
+    });
+  }
 
-async function restHttp(path: string, params: Record<string, string | number>) {
-  const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString();
-  let lastErr: unknown = null;
-  for (let attempt = 0; attempt < REST_HOSTS.length; attempt++) {
-    const idx = (client.hostIndex + attempt) % REST_HOSTS.length;
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 10_000);
+  private async restHttp(path: string, params: Record<string, string | number>) {
+    const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString();
+    const hosts = this.env.restHosts;
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt < hosts.length; attempt++) {
+      const idx = (this.hostIndex + attempt) % hosts.length;
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 10_000);
+      try {
+        const res = await fetch(`${hosts[idx]}${path}?${qs}`, { signal: ctrl.signal, cache: "no-store" });
+        if (res.status === 451) throw new GeoBlocked("A Binance bloqueou o acesso a partir da sua localização (HTTP 451).");
+        if (res.status === 429 || res.status === 418) throw new Error(`Limite de requisições da Binance (HTTP ${res.status})`);
+        if (res.status === 400) { // recusa da própria Binance vem com JSON {code, msg}; outra coisa (proxy, bloqueio) tenta o próximo caminho
+          const body = await res.json().catch(() => ({}));
+          if (typeof body.code === "number") throw new DataRejected(`Binance recusou: ${body.msg ?? "sem detalhe"}`, body.code);
+        }
+        if (!res.ok) throw new Error(`Binance respondeu HTTP ${res.status}`);
+        this.hostIndex = idx;
+        return await res.json();
+      } catch (e) {
+        if (e instanceof GeoBlocked || e instanceof DataRejected) throw e;
+        lastErr = e;
+      } finally {
+        clearTimeout(t);
+      }
+    }
+    throw new Error(`Sem conexão com a Binance: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async get(path: string, params: Record<string, string | number>): Promise<any> {
+    if (this.useWsApi) return this.wsApi(path, params);
     try {
-      const res = await fetch(`${REST_HOSTS[idx]}${path}?${qs}`, { signal: ctrl.signal, cache: "no-store" });
-      if (res.status === 451) throw new GeoBlocked("A Binance bloqueou o acesso a partir da sua localização (HTTP 451).");
-      if (res.status === 429 || res.status === 418) throw new Error(`Limite de requisições da Binance (HTTP ${res.status})`);
-      if (!res.ok) throw new Error(`Binance respondeu HTTP ${res.status}`);
-      client.hostIndex = idx;
-      return await res.json();
+      return await this.restHttp(path, params);
     } catch (e) {
-      if (e instanceof GeoBlocked) throw e;
-      lastErr = e;
-    } finally {
-      clearTimeout(t);
+      if (e instanceof GeoBlocked || e instanceof DataRejected) throw e;
+      const res = await this.wsApi(path, params); // REST indisponível (ex.: bloqueio do navegador): plano B
+      this.useWsApi = true;
+      return res;
     }
   }
-  throw new Error(`Sem conexão com a Binance: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
 }
 
+export const mainnetData = new DataClient(MAINNET);
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function binanceGet(path: string, params: Record<string, string | number>): Promise<any> {
-  if (client.useWsApi) return wsApi(path, params);
-  try {
-    return await restHttp(path, params);
-  } catch (e) {
-    if (e instanceof GeoBlocked) throw e;
-    const res = await wsApi(path, params); // REST indisponível (ex.: bloqueio do navegador): plano B
-    client.useWsApi = true;
-    return res;
-  }
+export function binanceGet(path: string, params: Record<string, string | number>): Promise<any> {
+  return mainnetData.get(path, params);
 }
 
 export class BinanceMarket implements MarketData {
@@ -152,11 +189,25 @@ export class BinanceMarket implements MarketData {
   lastError: string | null = null;
   lastResync = 0;
 
-  constructor(symbols: string[], quote: string, brlSymbol: string | null) {
-    this.symbols = symbols;
+  client: DataClient;
+  brlClient: DataClient;
+  dropMissing: boolean;
+  removed: string[] = [];
+  private lastBrl = 0;
+
+  constructor(symbols: string[], quote: string, brlSymbol: string | null,
+    opts: { client?: DataClient; brlClient?: DataClient; dropMissing?: boolean } = {}) {
+    this.symbols = [...symbols];
     this.quote = quote;
     this.brlSymbol = quote === "BRL" ? null : brlSymbol;
+    this.client = opts.client ?? mainnetData;
+    this.brlClient = opts.brlClient ?? this.client;
+    this.dropMissing = opts.dropMissing ?? false;
+    if (this.client.env.name === "testnet") { this.sourceName = "binance-testnet"; }
   }
+
+  /** A cotação USDT/BRL vem de outro ambiente (ex.: Testnet usa a cotação real da Binance). */
+  private get brlSeparate(): boolean { return !!this.brlSymbol && this.brlClient !== this.client; }
 
   getCandles(symbol: string, tf: TF) { return this.store.get(symbol, tf); }
   getBook(symbol: string) { return this.books.get(symbol) ?? null; }
@@ -164,15 +215,37 @@ export class BinanceMarket implements MarketData {
   brlBook() { return this.brlSymbol ? this.getBook(this.brlSymbol) : null; }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private rest(path: string, params: Record<string, string | number>): Promise<any> { return binanceGet(path, params); }
+  private rest(path: string, params: Record<string, string | number>): Promise<any> { return this.client.get(path, params); }
 
-  private wanted(): string[] { return [...this.symbols, ...(this.brlSymbol ? [this.brlSymbol] : [])]; }
+  private wanted(): string[] { return [...this.symbols, ...(this.brlSymbol && !this.brlSeparate ? [this.brlSymbol] : [])]; }
 
   async loadFilters() {
-    const info = await this.rest("/api/v3/exchangeInfo", { symbols: JSON.stringify(this.wanted()) });
-    for (const s of info.symbols ?? []) this.filters.set(s.symbol, filtersFromExchangeInfo(s));
-    const missing = this.wanted().filter((s) => !this.filters.has(s));
-    if (missing.length) throw new Error(`Pares não encontrados na Binance: ${missing.join(", ")}`);
+    const wanted = this.wanted();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let infos: any[] = [];
+    try {
+      infos = (await this.rest("/api/v3/exchangeInfo", { symbols: JSON.stringify(wanted) })).symbols ?? [];
+    } catch (e) {
+      if (!this.dropMissing || e instanceof GeoBlocked) throw e;
+      // a Binance recusa a consulta inteira se um par não existir (a Testnet tem menos pares): consulta um a um
+      for (const sym of wanted) {
+        try { infos.push(...((await this.rest("/api/v3/exchangeInfo", { symbol: sym })).symbols ?? [])); } catch { /* par ausente */ }
+      }
+    }
+    for (const s of infos) if (wanted.includes(s.symbol)) this.filters.set(s.symbol, filtersFromExchangeInfo(s));
+    if (this.brlSeparate && this.brlSymbol) {
+      // só a cotação é usada (conversão R$ -> USDT); sem os filtros dela o robô segue normalmente
+      try {
+        const bi = await this.brlClient.get("/api/v3/exchangeInfo", { symbols: JSON.stringify([this.brlSymbol]) });
+        for (const s of bi.symbols ?? []) this.filters.set(s.symbol, filtersFromExchangeInfo(s));
+      } catch { /* sem filtros do par de cotação */ }
+    }
+    const missing = wanted.filter((s) => !this.filters.has(s) || this.filters.get(s)!.status !== "TRADING");
+    if (missing.length && this.dropMissing) {
+      this.removed = missing.filter((s) => s !== this.brlSymbol);
+      this.symbols = this.symbols.filter((s) => !missing.includes(s));
+      if (!this.symbols.length) throw new Error(`Nenhum dos pares está disponível neste ambiente (${missing.join(", ")})`);
+    } else if (missing.length) throw new Error(`Pares não encontrados na Binance: ${missing.join(", ")}`);
   }
 
   async bootstrap(limit = 500) {
@@ -193,6 +266,15 @@ export class BinanceMarket implements MarketData {
       const bid = +r.bidPrice, ask = +r.askPrice;
       if (bid > 0 && ask > 0) this.books.set(r.symbol, { bid, ask, ts: now });
     }
+    if (this.brlSeparate) await this.refreshBrl();
+  }
+
+  async refreshBrl() {
+    if (!this.brlSymbol) return;
+    const rows = await this.brlClient.get("/api/v3/ticker/bookTicker", { symbols: JSON.stringify([this.brlSymbol]) });
+    const now = Date.now() / 1000;
+    for (const r of rows) if (+r.bidPrice > 0 && +r.askPrice > 0) this.books.set(r.symbol, { bid: +r.bidPrice, ask: +r.askPrice, ts: now });
+    this.lastBrl = now;
   }
 
   handle(payload: { data?: unknown } & Record<string, unknown>) {
@@ -218,8 +300,8 @@ export class BinanceMarket implements MarketData {
       for (const tf of TIMEFRAMES) names.push(`${low}@kline_${tf}`);
       names.push(`${low}@bookTicker`);
     }
-    if (this.brlSymbol) names.push(`${this.brlSymbol.toLowerCase()}@bookTicker`);
-    return `${WS_URL}/stream?streams=${names.join("/")}`;
+    if (this.brlSymbol && !this.brlSeparate) names.push(`${this.brlSymbol.toLowerCase()}@bookTicker`);
+    return `${this.client.env.streamBase}/stream?streams=${names.join("/")}`;
   }
 
   private connect() {
@@ -276,6 +358,7 @@ export class BinanceMarket implements MarketData {
         }
       }
       if (now - this.lastResync >= 600) await this.resync();
+      if (this.brlSeparate && now - this.lastBrl >= 10) await this.refreshBrl().catch(() => undefined);
     } catch (e) {
       if (e instanceof GeoBlocked) this.fatalError = e.message;
     }
@@ -312,7 +395,7 @@ export class BinanceMarket implements MarketData {
     for (const [s, b] of this.books) ages[s] = Math.round((now - b.ts) * 10) / 10;
     return {
       source: this.sourceName, synthetic: this.isSynthetic, fatal_error: this.fatalError, ready: this.ready, book_age_s: ages,
-      via: client.useWsApi ? "API WebSocket" : "REST",
+      via: this.client.useWsApi ? "API WebSocket" : "REST", ambiente: this.client.env.name, removidos: this.removed,
       websocket: { connected: this.connected, reconnects: this.reconnects, messages: this.messages,
         last_message_age_s: this.lastMessage ? Math.round((now - this.lastMessage) * 10) / 10 : null, last_error: this.lastError },
     };

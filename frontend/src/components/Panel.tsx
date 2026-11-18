@@ -21,15 +21,21 @@ export function Panel({ d, onAction }: {
 
   return (
     <>
+      {d.mode === "TESTNET" && (
+        <div className="banner warn">
+          TESTNET: o robô envia ordens de verdade ao ambiente de TESTES da Binance (dinheiro fictício), usando só o capital
+          separado para ele. O stop de cada operação fica registrado na corretora e protege mesmo com o app fechado.
+        </div>
+      )}
       <div className="banner info">
         O robô roda dentro deste app: ele analisa e opera enquanto o app estiver aberto na tela
         (a tela fica ligada automaticamente). Fechou o app, ele para — o histórico fica salvo no celular.
       </div>
       {!d.account.initialized && (
-        <div className="banner warn">Conta simulada aguardando a cotação real USDT/BRL para converter R$30. Nenhum valor é inventado.</div>
+        <div className="banner warn">{d.brain.activity || "Aguardando a cotação real USDT/BRL para converter R$30. Nenhum valor é inventado."}</div>
       )}
 
-      <Card className="hero" title="Saldo total" right={<span className="pill mode">{d.mode === "SIMULACAO" ? "Simulação" : d.mode}</span>}>
+      <Card className="hero" title={d.mode === "TESTNET" ? "Capital do robô (Testnet)" : "Saldo total"} right={<span className="pill mode">{d.mode === "SIMULACAO" ? "Simulação" : d.mode}</span>}>
         <div className="hero-value">{brl(d.account.equity_brl)}</div>
         <div className="hero-sub">{num(d.account.equity, 4)} {q}{d.account.brl_rate ? ` · USDT/BRL ${num(d.account.brl_rate, 3)}` : ""}</div>
         <div className="hero-row">
@@ -68,7 +74,7 @@ export function Panel({ d, onAction }: {
         <Stat label="Taxa de acerto" value={d.totals.win_rate === null ? "—" : pct(d.totals.win_rate, 1)}
           hint={d.totals.trades < 30 ? "amostra pequena" : `PF ${num(d.totals.profit_factor)}`} />
         <Stat label="Estado do robô" value={<StatusPill status={d.status} />} hint={`app aberto há ${duration(d.uptime_s)}`} />
-        <Stat label="Modo de operação" value={<span className="accent" style={{ fontSize: 15 }}>{d.mode === "SIMULACAO" ? "SIMULAÇÃO" : d.mode}</span>} hint="sem dinheiro real" />
+        <Stat label="Modo de operação" value={<span className="accent" style={{ fontSize: 15 }}>{d.mode === "SIMULACAO" ? "SIMULAÇÃO" : d.mode}</span>} hint={d.mode === "TESTNET" ? "dinheiro de teste" : "sem dinheiro real"} />
       </div>
 
       <SectionTitle>Proteção de capital</SectionTitle>

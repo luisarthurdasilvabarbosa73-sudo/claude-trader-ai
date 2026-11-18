@@ -93,54 +93,54 @@ function setup(kv = new MemoryKV()) {
   const repo = new Repo(kv);
   const eng = new TradingEngine({ ...DEFAULT_CONFIG, symbols: ["BTCUSDT"] }, repo, m, { strategy: stub, clock: () => m.now });
   let i = 12_800;
-  const next = (k = 1) => { for (let j = 0; j < k; j++) replayCandle(m, eng, i++); };
+  const next = async (k = 1) => { for (let j = 0; j < k; j++) await replayCandle(m, eng, i++); };
   return { m, eng, stub, repo, next, kv };
 }
 
-test("parado: analisa mas nunca entra", () => {
+test("parado: analisa mas nunca entra", async () => {
   const { eng, stub, next } = setup();
   stub.signal = true;
-  next(3);
+  await next(3);
   assert.equal(eng.positions.size, 0);
   assert.equal(eng.brain.latest.BTCUSDT.decision, "BLOQUEADA PELO RISCO");
 });
 
-test("ciclo completo, sem duplicidade e emergência", () => {
+test("ciclo completo, sem duplicidade e emergência", async () => {
   const { eng, stub, next, repo, m } = setup();
-  next(1);
+  await next(1);
   eng.start(m.now);
   stub.signal = true;
-  next(1);
+  await next(1);
   assert.equal(eng.positions.size, 1);
-  next(3);
+  await next(3);
   assert.equal(repo.countOrders(), 1); // sinal repetido não duplica
-  const res = eng.emergencyStop(m.now);
+  const res = await eng.emergencyStop(m.now);
   assert.deepEqual(res.closed, ["BTCUSDT"]);
   assert.equal(eng.status, "EMERGENCIA");
-  next(2);
+  await next(2);
   assert.equal(eng.positions.size, 0);
   assert.equal(repo.closedPositions()[0].exit_reason, "EMERGENCIA");
 });
 
-test("dados desatualizados bloqueiam entradas", () => {
+test("dados desatualizados bloqueiam entradas", async () => {
   const { eng, stub, next, m } = setup();
-  next(1);
+  await next(1);
   eng.start(m.now);
   stub.signal = true;
   m.setPrices(12_801, "close", m.now);
   m.pushClosed(12_801);
-  eng.step(m.now + 60);
+  await eng.step(m.now + 60);
   assert.equal(eng.positions.size, 0);
   assert.ok((eng.brain.latest.BTCUSDT.blockers as string[]).some((b) => b.includes("desatualizada")));
 });
 
-test("reabrir o app restaura posições e conta (histórico salvo no aparelho)", () => {
+test("reabrir o app restaura posições e conta (histórico salvo no aparelho)", async () => {
   const kv = new MemoryKV();
   const a = setup(kv);
-  a.next(1);
+  await a.next(1);
   a.eng.start(a.m.now);
   a.stub.signal = true;
-  a.next(1);
+  await a.next(1);
   const eq = a.eng.equity()[0];
   const eng2 = new TradingEngine({ ...DEFAULT_CONFIG, symbols: ["BTCUSDT"] }, new Repo(kv), a.m, { clock: () => a.m.now });
   assert.equal(eng2.positions.size, 1);

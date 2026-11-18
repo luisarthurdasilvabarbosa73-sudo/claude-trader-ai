@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { AiReports, Dashboard, ModeInfo, RiskResponse } from "../types";
+import type { AiReports, Dashboard, RiskResponse } from "../types";
+import { ModeCard } from "./ModeCard";
 import { dateTime } from "../format";
 import { Card, ConfirmDialog, Empty, SectionTitle } from "./ui";
 
@@ -19,12 +20,11 @@ const FIELDS: { key: string; label: string; unit: string; help: string }[] = [
   { key: "slippage_pct", label: "Slippage simulado", unit: "%", help: "Além do spread real." },
 ];
 
-export function Settings({ d, notify, onToast }: {
-  d: Dashboard; notify: { permission: string; enable: () => void }; onToast: (m: string, err?: boolean) => void;
+export function Settings({ d, notify, onToast, onChanged }: {
+  d: Dashboard; notify: { permission: string; enable: () => void }; onToast: (m: string, err?: boolean) => void; onChanged: () => void;
 }) {
   const [risk, setRisk] = useState<RiskResponse | null>(null);
   const [form, setForm] = useState<Record<string, string>>({});
-  const [modes, setModes] = useState<ModeInfo | null>(null);
   const [ai, setAi] = useState<AiReports | null>(null);
   const [question, setQuestion] = useState("");
   const [aiKey, setAiKey] = useState("");
@@ -36,7 +36,6 @@ export function Settings({ d, notify, onToast }: {
       setRisk(r);
       setForm(Object.fromEntries(Object.entries(r.settings).map(([k, v]) => [k, String(v)])));
     }).catch(() => undefined);
-    api<ModeInfo>("/api/mode").then(setModes).catch(() => undefined);
     api<AiReports>("/api/ai/reports").then(setAi).catch(() => undefined);
   }, []);
 
@@ -84,19 +83,7 @@ export function Settings({ d, notify, onToast }: {
   return (
     <>
       <SectionTitle>Modo de operação</SectionTitle>
-      <Card>
-        {(modes?.modes ?? []).map((m) => (
-          <div className="row" key={m.mode}>
-            <div className="row-main">
-              <div className="row-title">{m.label}</div>
-              <div className="row-sub">{m.detail}</div>
-            </div>
-            {m.mode === d.mode ? <span className="pill mode">Ativo</span>
-              : <span className="pill lock">{m.available ? "Disponível" : "🔒 Bloqueado"}</span>}
-          </div>
-        ))}
-        <p className="dim small">O modo REAL só pode ser liberado com sua autorização explícita em uma etapa futura.</p>
-      </Card>
+      <ModeCard current={d.mode} onToast={onToast} onChanged={onChanged} />
 
       <SectionTitle>Gestão de risco</SectionTitle>
       <Card>
@@ -154,10 +141,10 @@ export function Settings({ d, notify, onToast }: {
         ))}
       </Card>
 
-      <SectionTitle>Conta simulada</SectionTitle>
+      <SectionTitle>{d.mode === "TESTNET" ? "Capital do robô na Testnet" : "Conta simulada"}</SectionTitle>
       <Card>
         <p className="small muted">{d.account.initial?.conversion ?? "Aguardando criação."}</p>
-        <button className="btn block" onClick={() => setResetOpen(true)}>Zerar simulação (volta a R$30)</button>
+        <button className="btn block" onClick={() => setResetOpen(true)}>{d.mode === "TESTNET" ? "Recomeçar capital do robô (R$30)" : "Zerar simulação (volta a R$30)"}</button>
       </Card>
 
 

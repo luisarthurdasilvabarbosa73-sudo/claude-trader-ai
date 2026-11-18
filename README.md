@@ -3,8 +3,9 @@
 Robô de day trade para **Binance Spot** (sem alavancagem) que **roda dentro do próprio app no celular**:
 sem servidor e sem mensalidade. Ele analisa o mercado e opera **enquanto o app está aberto na tela**.
 
-> **Estado atual: SOMENTE SIMULAÇÃO (paper trading)** — dados reais da Binance, R$30 fictícios.
-> Testnet e conta real estão bloqueadas. Nenhum resultado aqui é promessa de lucro.
+> **Estado atual: SIMULAÇÃO e TESTNET.** Simulação usa dados reais e dinheiro fictício no próprio app;
+> Testnet envia ordens de verdade ao ambiente de testes da Binance (dinheiro fictício).
+> **Conta real bloqueada.** Nenhum resultado aqui é promessa de lucro.
 
 ## Como funciona
 ```
@@ -32,7 +33,8 @@ sem servidor e sem mensalidade. Ele analisa o mercado e opera **enquanto o app e
 | Motor do app idêntico ao motor Python de referência (teste de paridade) | ✅ |
 | Backtest com dados históricos reais | ✅ **no próprio app** (Histórico → Backtest): baixa da Binance e roda o mesmo robô |
 | IA (Claude) opcional — só analisa, nunca altera limites | ✅ (chave salva só no aparelho) |
-| Testnet / Real | 🔒 bloqueados |
+| **Testnet** (ETAPA 9): ordens reais de teste, stop registrado na corretora, sem ordem duplicada, conciliação | ✅ [como usar](docs/TESTNET.md) |
+| Conta real | 🔒 bloqueada (ETAPA 10, só com sua autorização) |
 
 ## Estrutura
 ```
@@ -46,6 +48,7 @@ docs/                estratégia, risco, arquitetura, testes, instalação
 
 ## Documentação
 - [Instalar no celular](docs/INSTALAR_NO_CELULAR.md)
+- [Testnet: criar chave e ativar](docs/TESTNET.md)
 - [Estratégia (regras completas)](docs/ESTRATEGIA.md)
 - [Risco, capital e o problema dos R$30](docs/RISCO_E_CAPITAL.md)
 - [Arquitetura](docs/ARQUITETURA.md)

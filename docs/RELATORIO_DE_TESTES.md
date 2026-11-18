@@ -1,5 +1,24 @@
 # Relatório de testes
 
+## Atualização (18/11/2026, tarde) — ETAPA 9: Testnet da Binance
+- **19 testes do motor do app** (eram 13). Novos, contra uma **corretora simulada** que segue o protocolo
+  oficial da API WebSocket e confere cada assinatura:
+  - assinatura HMAC-SHA256 idêntica aos dois exemplos oficiais da Binance (REST e API WebSocket);
+  - capital separado: com 10.000 USDT de teste na conta, o robô usa só os R$30;
+  - compra a mercado → stop STOP_LOSS_LIMIT registrado **na corretora** → no break-even o stop antigo é
+    cancelado e trocado → no alvo o stop é cancelado e a venda acontece; nenhuma ordem esquecida;
+  - stop executado pela corretora com o **app fechado** → ao reabrir, reconhecido como "Stop na corretora";
+  - resposta de ordem **perdida** → o robô consulta a ordem e **não compra duas vezes**;
+  - saldo da conta diferente do registro → **pausa** novas entradas com alerta crítico;
+  - sem saldo de teste/sem permissão → o robô não cria o capital.
+- O teste de paridade com o motor Python continua idêntico (mesmas decisões e operações).
+- **Ponta a ponta no Chrome** com a Testnet simulada (REST + streams + API WebSocket assinada):
+  chave salva e exibida mascarada, "Testar conexão" OK, ativação com a palavra TESTNET, capital
+  R$30 → 5,549 USDT pela cotação real, par ausente (ADAUSDT) retirado automaticamente, robô rodando 70 s,
+  conciliação feita, volta para a Simulação; **0 assinaturas inválidas, 0 bloqueios de CSP**.
+- **Não testado:** conexão com a Testnet de verdade (o ambiente de construção não acessa a Binance).
+  O primeiro "Testar conexão" no seu celular é esse teste.
+
 ## Atualização (18/11/2026) — backtest no app + modo real testado com Binance simulada
 - **13 testes do motor do app** (era 10): + backtest com download paginado (1000 minutos por página),
   + estatística honesta, + o backtest do app reproduz as mesmas operações do motor Python.
@@ -62,7 +81,7 @@ Também conferido: patrimônio = capital inicial + soma dos resultados (diferen�
 5. Tipos do TypeScript (lib WebWorker conflitando com DOM) — corrigido.
 
 ## O que NÃO foi testado ainda (honestamente)
-- Conexão real com a Binance (o ambiente de construção não tinha acesso à internet).
+- Conexão real com a Binance e com a Testnet (o ambiente de construção não tinha acesso à internet).
 - Backtest com dados históricos reais — pronto para rodar no GitHub Actions.
 - Compilação oficial com Vite e verificação de tipos completa com `@types/react` — roda no GitHub Actions.
 - Implantação na nuvem e funcionamento 24h — ETAPA 8.

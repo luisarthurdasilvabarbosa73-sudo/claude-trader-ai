@@ -1,6 +1,7 @@
 // Motor autônomo do robô — tradução fiel de backend/app/engine/bot.py (+ brain.py e stats.py).
 // Roda dentro do app: a cada segundo protege posições e, a cada candle de 1m fechado, analisa.
 import { roundPrice } from "./filters.ts";
+import type { Broker } from "./broker.ts";
 import type { MarketData } from "./market.ts";
 import { OrderRejected, PaperBroker } from "./paper.ts";
 import type { Repo } from "./repo.ts";
@@ -9,7 +10,7 @@ import type { RiskSettings, RiskState } from "./risk.ts";
 import { Strategy, STRATEGY_NAME, STRATEGY_VERSION } from "./strategy.ts";
 import type { Analysis } from "./strategy.ts";
 import { TIMEFRAMES } from "./types.ts";
-import type { BotStatus, Book, Candle, Fill, Position, TF } from "./types.ts";
+import type { BotStatus, Book, Candle, Fill, Mode, Position, TF } from "./types.ts";
 
 export interface EngineConfig {
   symbols: string[];
@@ -118,8 +119,8 @@ export class TradingEngine {
   fastEval = false;
   riskSettings: RiskSettings;
   risk: RiskManager;
-  broker: PaperBroker;
-  mode: "SIMULACAO" = "SIMULACAO";
+  broker: Broker;
+  mode: Mode;
   strategy: Strategy;
   brain = new Brain();
   quote: string;
@@ -138,7 +139,7 @@ export class TradingEngine {
   statusReason: string;
 
   constructor(cfg: EngineConfig, repo: Repo, market: MarketData,
-    opts: { strategy?: Strategy; clock?: () => number; persistDecisions?: boolean } = {}) {
+    opts: { strategy?: Strategy; clock?: () => number; persistDecisions?: boolean; broker?: Broker } = {}) {
     this.cfg = cfg;
     this.repo = repo;
     this.market = market;
@@ -147,7 +148,8 @@ export class TradingEngine {
     try { this.riskSettings = validateRisk(repo.kvGet<Record<string, number>>("risk_settings", {}) ?? {}); }
     catch { this.riskSettings = { ...DEFAULT_RISK }; }
     this.risk = new RiskManager(this.riskSettings, { ...newRiskState(), ...repo.kvGet<Partial<RiskState>>("risk_state", {}) });
-    this.broker = new PaperBroker(repo, feeRate(this.riskSettings), this.riskSettings.slippage_pct);
+    this.broker = opts.broker ?? new PaperBroker(repo, feeRate(this.riskSettings), this.riskSettings.slippage_pct);
+    this.mode = this.broker.mode;
     this.strategy = opts.strategy ?? new Strategy();
     this.quote = cfg.quoteAsset;
     for (const p of repo.openPositions(this.mode)) this.positions.set(p.symbol, p);
@@ -181,7 +183,7 @@ export class TradingEngine {
   // --------------------------------------------------------- conta/saldo
   accountReady(): boolean { return this.broker.initialized; }
 
-  ensureAccount(now: number): boolean {
+  async ensureAccount(now: number): Promise<boolean> {
     if (this.accountReady()) return true;
     const brl = this.cfg.initialCapitalBrl;
     let amount: number;
@@ -199,9 +201,15 @@ export class TradingEngine {
     amount = Math.round(amount * 1e8) / 1e8;
     const meta = { initial_brl: brl, initial_quote: amount, brl_rate: rate, ts: now,
       conversion: rate ? `R$${brl} / ${rate} (${this.cfg.brlRateSymbol} ask) - taxa ${this.riskSettings.fee_rate_pct}%` : "moeda de cotação já é BRL" };
-    this.broker.initialize(this.quote, amount, meta);
+    try {
+      await this.broker.initialize(this.quote, amount, meta);
+    } catch (e) {
+      this.brain.activity = `Não foi possível preparar a conta: ${e instanceof Error ? e.message : e}`;
+      if (this.throttled("account-init", now, 60)) this.log("AVISO", "conta", this.brain.activity, null, now);
+      return false;
+    }
     this.risk.newDay(dayKey(now, this.cfg.tzOffsetHours), this.equity()[0]);
-    const msg = `Conta simulada criada: R$${brl} -> ${amount.toFixed(4)} ${this.quote}` + (rate ? ` (cotação real ${this.cfg.brlRateSymbol} ${rate})` : "");
+    const msg = `${this.broker.sendsOrders ? "Capital do robô na Testnet separado" : "Conta simulada criada"}: R$${brl} -> ${amount.toFixed(4)} ${this.quote}` + (rate ? ` (cotação real ${this.cfg.brlRateSymbol} ${rate})` : "");
     this.log("INFO", "conta", msg, meta, now);
     this.brain.think(now, "info", msg);
     return true;
@@ -260,7 +268,7 @@ export class TradingEngine {
     this.brain.think(now, "info", "Robô pausado: sem novas entradas. Stops das posições abertas continuam ativos.");
   }
 
-  emergencyStop(now = this.clock(), reason = "Botão de emergência") {
+  async emergencyStop(now = this.clock(), reason = "Botão de emergência") {
     this.status = "EMERGENCIA";
     this.statusReason = reason;
     this.persistState();
@@ -268,7 +276,7 @@ export class TradingEngine {
     const closed: string[] = [], failed: string[] = [];
     for (const pos of [...this.positions.values()]) {
       const b = this.market.getBook(pos.symbol);
-      if (b && this.close(pos, b, now, "EMERGENCIA", reason)) closed.push(pos.symbol); else failed.push(pos.symbol);
+      if (b && (await this.close(pos, b, now, "EMERGENCIA", reason))) closed.push(pos.symbol); else failed.push(pos.symbol);
     }
     this.brain.think(now, "alerta", `EMERGÊNCIA: robô travado. Posições encerradas: ${closed.length ? closed.join(", ") : "nenhuma"}` +
       (failed.length ? `; FALHA ao encerrar: ${failed.join(", ")}` : ""));
@@ -307,16 +315,17 @@ export class TradingEngine {
     return [true, ""];
   }
 
-  step(now = this.clock()) {
+  async step(now = this.clock()) {
     this.stepCount += 1;
     this.lastStepTs = now;
     this.rolloverDay(now);
-    if (!this.ensureAccount(now)) return;
+    if (!(await this.ensureAccount(now))) return;
     if (this.risk.checkDailyLoss(this.equity()[0])) {
       this.log("AVISO", "risco", this.risk.state.daily_lock_reason, null, now);
       this.brain.think(now, "risco", this.risk.state.daily_lock_reason);
     }
-    for (const s of this.cfg.symbols) this.stepSymbol(s, now);
+    for (const s of this.cfg.symbols) await this.stepSymbol(s, now);
+    await this.reconcile(now);
     if (now - this.lastEquityTs >= 300) {
       this.lastEquityTs = now;
       const eq = this.equity()[0];
@@ -339,12 +348,14 @@ export class TradingEngine {
     }
   }
 
-  private stepSymbol(symbol: string, now: number) {
+  private async stepSymbol(symbol: string, now: number) {
     const [fresh, reason] = this.dataFresh(symbol, now);
     const book = this.market.getBook(symbol);
     const pos = this.positions.get(symbol);
-    if (pos) {
-      if (fresh && book) this.manage(pos, book, now);
+    if (pos) await this.guardExchange(pos, now);
+    const still = this.positions.get(symbol);
+    if (still) {
+      if (fresh && book) await this.manage(still, book, now);
       else if (this.throttled(`stale-pos-${symbol}`, now)) {
         const msg = `Posição aberta em ${symbol} sem dados atualizados (${reason}). Saídas aguardando dados válidos.`;
         this.log("AVISO", "dados", msg, null, now);
@@ -357,12 +368,12 @@ export class TradingEngine {
     const lastClosed = closed[closed.length - 1].openTime;
     if (lastClosed > (this.lastEval.get(symbol) ?? 0)) {
       this.lastEval.set(symbol, lastClosed);
-      this.evaluate(symbol, now, book, fresh, reason, lastClosed);
+      await this.evaluate(symbol, now, book, fresh, reason, lastClosed);
     }
   }
 
   // ------------------------------------------------------------- análise
-  private evaluate(symbol: string, now: number, book: Book | null, fresh: boolean, reason: string, candleTime: number) {
+  private async evaluate(symbol: string, now: number, book: Book | null, fresh: boolean, reason: string, candleTime: number) {
     const rs = this.riskSettings;
     const candles = {} as Record<TF, Candle[]>;
     for (const tf of TIMEFRAMES) candles[tf] = this.market.getCandles(symbol, tf);
@@ -372,7 +383,7 @@ export class TradingEngine {
     const pos = this.positions.get(symbol);
     if (pos && fresh && book) {
       const why = this.strategy.trendInvalidated(symbol, candles["15m"], pos.entry_time);
-      if (why) this.close(pos, book, now, "TENDENCIA_INVALIDADA", why);
+      if (why) await this.close(pos, book, now, "TENDENCIA_INVALIDADA", why);
     }
 
     const a = this.strategy.evaluate(symbol, candles, book, now, { feeRate: feeRate(rs), slippagePct: rs.slippage_pct,
@@ -400,7 +411,7 @@ export class TradingEngine {
           this.brain.think(now, "rejeitada", `Sinal em ${symbol} recusado: ${sz.reason}`, symbol);
           if (this.throttled(`capital-${symbol}`, now, 900)) this.log("AVISO", "capital", sz.reason, sz.details, now);
         } else if (book) {
-          const opened = this.open(symbol, a, sz.qty, sz.risk_quote, book, now);
+          const opened = await this.open(symbol, a, sz.qty, sz.risk_quote, book, now);
           decision = opened ? "ACEITA" : "FALHA NA EXECUÇÃO";
           accepted = !!opened;
         }
@@ -415,14 +426,14 @@ export class TradingEngine {
   }
 
   // ------------------------------------------------------------- execução
-  private open(symbol: string, a: Analysis, qty: number, riskQuote: number, book: Book, now: number): Position | null {
+  private async open(symbol: string, a: Analysis, qty: number, riskQuote: number, book: Book, now: number): Promise<Position | null> {
     const f = this.market.getFilters(symbol)!;
-    const cid = `CTA-${symbol}-${Math.floor(a.last_1m_open_time / 60000)}-B`;
+    const cid = `${this.cidPrefix()}-${symbol}-${Math.floor(a.last_1m_open_time / 60000)}-B`;
     this.inFlight.add(symbol);
     let pos: Position;
     let fill: Fill;
     try {
-      fill = this.broker.marketBuy(symbol, qty, book, f, cid, now);
+      fill = await this.broker.marketBuy(symbol, qty, book, f, cid, now);
       const held = fill.qty - (fill.fee_asset === f.baseAsset ? fill.fee : 0);
       const stop = roundPrice(f, a.stop!);
       const tp = roundPrice(f, a.take_profit!, true);
@@ -432,6 +443,7 @@ export class TradingEngine {
         atr_at_entry: a.atr_5m ?? 0, score: a.score, strategy: a.strategy, entry_order_id: cid, fees_quote: fill.fee_quote,
         highest_price: book.bid, breakeven_done: false, exit_time: null, exit_price: null, exit_reason: null,
         exit_order_id: null, proceeds_quote: null, pnl_quote: null, pnl_pct: null, r_multiple: null, notes: [],
+        protect_order_id: null, protect_failures: 0,
       };
       this.repo.savePosition(pos);
       this.repo.linkOrder(cid, pos.id!);
@@ -452,15 +464,16 @@ export class TradingEngine {
       this.inFlight.delete(symbol);
     }
     this.positions.set(symbol, pos);
-    const msg = `COMPRA SIMULADA ${symbol}: ${pos.qty} a ${fill.price.toPrecision(6)} (custo ${fill.quote_qty.toFixed(4)} ${this.quote}, ` +
+    const msg = `COMPRA ${this.broker.sendsOrders ? "NA TESTNET" : "SIMULADA"} ${symbol}: ${pos.qty} a ${fill.price.toPrecision(6)} (custo ${fill.quote_qty.toFixed(4)} ${this.quote}, ` +
       `taxa ${fill.fee_quote.toFixed(5)}); stop ${pos.stop_price} / alvo ${pos.take_profit}; pontuação ${a.score.toFixed(0)}; ` +
       `risco planejado ${riskQuote.toFixed(4)} ${this.quote}`;
     this.log("INFO", "operacao", msg, { position_id: pos.id, reasons: a.reasons }, now);
     this.brain.think(now, "aceita", msg + " | Motivos: " + a.reasons.join("; "), symbol);
+    await this.protectOnExchange(pos, now);
     return pos;
   }
 
-  private manage(pos: Position, book: Book, now: number) {
+  private async manage(pos: Position, book: Book, now: number) {
     const bid = book.bid;
     const fee = feeRate(this.riskSettings);
     if (bid > pos.highest_price) pos.highest_price = bid;
@@ -479,28 +492,40 @@ export class TradingEngine {
       const trail = pos.highest_price - pos.atr_at_entry;
       if (trail > pos.stop_price + r * 0.1) { pos.stop_price = trail; changed = true; }
     }
-    if (changed) this.repo.savePosition(pos);
+    if (changed) {
+      this.repo.savePosition(pos);
+      await this.protectOnExchange(pos, now);
+    }
+    if (!this.positions.has(pos.symbol)) return;
     if (bid <= pos.stop_price) {
       const reason = !pos.breakeven_done ? "STOP_LOSS" : pos.stop_price > be ? "STOP_MOVEL" : "BREAK_EVEN";
-      this.close(pos, book, now, reason, `bid ${bid} <= stop ${pos.stop_price}`);
+      await this.close(pos, book, now, reason, `bid ${bid} <= stop ${pos.stop_price}`);
     } else if (bid >= pos.take_profit) {
-      this.close(pos, book, now, "TAKE_PROFIT", `bid ${bid} >= alvo ${pos.take_profit}`);
+      await this.close(pos, book, now, "TAKE_PROFIT", `bid ${bid} >= alvo ${pos.take_profit}`);
     } else if (now - pos.entry_time >= this.riskSettings.max_trade_minutes * 60) {
-      this.close(pos, book, now, "TEMPO_MAXIMO", `operação aberta há mais de ${this.riskSettings.max_trade_minutes} min`);
+      await this.close(pos, book, now, "TEMPO_MAXIMO", `operação aberta há mais de ${this.riskSettings.max_trade_minutes} min`);
     }
   }
 
-  close(pos: Position, book: Book, now: number, reason: string, detail = ""): boolean {
+  async close(pos: Position, book: Book, now: number, reason: string, detail = ""): Promise<boolean> {
     const f = this.market.getFilters(pos.symbol);
     if (!f) return false;
-    const cid = `CTA-${pos.id}-S`; // um único ID de saída por posição: impede venda duplicada
+    const cid = `${this.cidPrefix()}-${pos.id}-S`; // um único ID de saída por posição: impede venda duplicada
     const heldBefore = this.broker.balances()[f.baseAsset] ?? 0;
     const dustBefore = Math.max(heldBefore - pos.qty, 0);
     let fill: Fill;
     try {
-      fill = this.broker.marketSell(pos.symbol, heldBefore, book, f, cid, now); // vende TODO o saldo (recicla a poeira)
+      if (this.broker.unprotect && pos.protect_order_id) {
+        // tira o stop da corretora antes de vender; se ele já tinha sido executado, usa essa execução
+        const done = await this.broker.unprotect(pos, f, now);
+        pos.protect_order_id = null;
+        this.repo.savePosition(pos);
+        if (done) return this.finishClose(pos, f, done, dustBefore, now, "STOP_CORRETORA", "stop executado pela corretora");
+      }
+      fill = await this.broker.marketSell(pos.symbol, heldBefore, book, f, cid, now); // vende TODO o saldo (recicla a poeira)
     } catch (e) {
       this.broker.reload();
+      if (this.broker.protect && this.positions.has(pos.symbol)) await this.protectOnExchange(pos, now); // volta a proteger
       if (e instanceof OrderRejected) {
         if (this.throttled(`close-fail-${pos.symbol}`, now, 300)) {
           const msg = `NÃO foi possível vender ${pos.symbol} (${reason}): ${e.message}. Se o valor da posição ficou abaixo do mínimo da Binance, ela só poderá ser vendida se o preço subir.`;
@@ -514,6 +539,11 @@ export class TradingEngine {
       }
       return false;
     }
+    return this.finishClose(pos, f, fill, dustBefore, now, reason, detail);
+  }
+
+  private finishClose(pos: Position, f: NonNullable<ReturnType<MarketData["getFilters"]>>, fill: Fill, dustBefore: number,
+    now: number, reason: string, detail: string): boolean {
     const net = fill.quote_qty - (fill.fee_asset === f.quoteAsset ? fill.fee : 0);
     const dustAfter = this.broker.balances()[f.baseAsset] ?? 0;
     const dustDelta = (dustAfter - dustBefore) * fill.price * (1 - feeRate(this.riskSettings));
@@ -521,7 +551,7 @@ export class TradingEngine {
     pos.exit_time = now;
     pos.exit_price = fill.price;
     pos.exit_reason = reason;
-    pos.exit_order_id = cid;
+    pos.exit_order_id = fill.client_order_id;
     pos.proceeds_quote = net;
     pos.fees_quote += fill.fee_quote;
     pos.pnl_quote = net + dustDelta - pos.cost_quote;
@@ -530,7 +560,7 @@ export class TradingEngine {
     if (Math.abs(dustAfter - dustBefore) > 1e-15) pos.notes.push(`poeira ${f.baseAsset}: ${dustBefore} -> ${dustAfter} (valor incluído no resultado)`);
     if (detail) pos.notes.push(detail);
     this.repo.savePosition(pos);
-    this.repo.linkOrder(cid, pos.id ?? 0);
+    this.repo.linkOrder(fill.client_order_id, pos.id ?? 0);
     this.positions.delete(pos.symbol);
     const pause = this.risk.onTradeClosed(pos.symbol, pos.pnl_quote, now);
     const msg = `VENDA ${pos.symbol} [${reason}] a ${fill.price.toPrecision(6)}: ${pos.pnl_quote > 0 ? "LUCRO" : "PREJUÍZO"} de ` +
@@ -540,6 +570,74 @@ export class TradingEngine {
     this.brain.think(now, "saida", msg, pos.symbol);
     if (pause) { this.log("AVISO", "risco", pause, null, now); this.brain.think(now, "risco", pause); }
     return true;
+  }
+
+  // ------------------------------------------------- proteção na corretora
+  private cidPrefix(): string {
+    const tag = this.broker.meta.tag;
+    return typeof tag === "string" && tag ? `CTA${tag}` : "CTA";
+  }
+
+  /** Registra (ou move) o stop-loss na corretora. Sem proteção após 3 tentativas = encerra a posição. */
+  private async protectOnExchange(pos: Position, now: number) {
+    if (!this.broker.protect) return;
+    const f = this.market.getFilters(pos.symbol);
+    if (!f) return;
+    try {
+      await this.broker.protect(pos, f, now);
+      pos.protect_failures = 0;
+      this.repo.savePosition(pos);
+    } catch (e) {
+      pos.protect_failures = (pos.protect_failures ?? 0) + 1;
+      this.repo.savePosition(pos);
+      const msg = `Falha ao registrar o stop de ${pos.symbol} na corretora (${pos.protect_failures}/3): ${e instanceof Error ? e.message : e}`;
+      this.log("CRITICO", "ordem", msg, null, now);
+      this.brain.think(now, "alerta", msg, pos.symbol);
+    }
+  }
+
+  /** Confere o stop da corretora e tenta proteger posições ainda sem stop registrado. */
+  private async guardExchange(pos: Position, now: number) {
+    if (!this.broker.sendsOrders) return;
+    const f = this.market.getFilters(pos.symbol);
+    if (!f) return;
+    if (pos.protect_order_id && this.broker.checkProtection && this.throttled(`check-${pos.id}`, now, 15)) {
+      try {
+        const fill = await this.broker.checkProtection(pos, f, now);
+        if (fill) {
+          const dustBefore = Math.max((this.broker.balances()[f.baseAsset] ?? 0) + fill.qty - pos.qty, 0);
+          this.finishClose(pos, f, fill, dustBefore, now, "STOP_CORRETORA", "stop executado pela corretora");
+          return;
+        }
+      } catch (e) {
+        if (this.throttled(`check-fail-${pos.id}`, now, 120)) this.log("AVISO", "ordem", `Não foi possível consultar o stop de ${pos.symbol}: ${e}`, null, now);
+      }
+    }
+    if (!pos.protect_order_id && this.broker.protect && this.throttled(`reprotect-${pos.id}`, now, 10)) {
+      if ((pos.protect_failures ?? 0) >= 3) {
+        const book = this.market.getBook(pos.symbol);
+        if (book) await this.close(pos, book, now, "SEM_PROTECAO", "stop não pôde ser registrado na corretora (stop é obrigatório)");
+        return;
+      }
+      await this.protectOnExchange(pos, now);
+    }
+  }
+
+  private async reconcile(now: number) {
+    if (!this.broker.reconcile || !this.throttled("reconcile", now, 60)) return;
+    try {
+      const issues = await this.broker.reconcile([...this.positions.values()], now);
+      for (const msg of issues) {
+        this.log("CRITICO", "conciliacao", msg, null, now);
+        this.brain.think(now, "alerta", msg);
+      }
+      if (issues.length) {
+        this.risk.state.pause_until = now + 15 * 60;
+        this.risk.state.pause_reason = "Saldo da conta diferente do registrado pelo robô: novas entradas pausadas por 15 min.";
+      }
+    } catch (e) {
+      if (this.throttled("reconcile-fail", now, 300)) this.log("AVISO", "conciliacao", `Conciliação indisponível: ${e}`, null, now);
+    }
   }
 
   // ------------------------------------------------------------- snapshot
@@ -575,6 +673,7 @@ export class TradingEngine {
     const avail = Math.max(free - reserve, 0);
     return {
       server_time: now, uptime_s: now - this.startedAt, mode: this.mode, mode_label: MODE_LABEL[this.mode], is_real_money: false,
+      sends_orders: this.broker.sendsOrders,
       data_source: this.market.sourceName, synthetic_data: this.market.isSynthetic, status: st, status_reason: reason,
       strategy: `${STRATEGY_NAME} v${STRATEGY_VERSION}`, symbols: this.cfg.symbols,
       account: {

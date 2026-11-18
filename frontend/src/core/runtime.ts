@@ -2,11 +2,14 @@
 // responde direto do motor que roda no celular.
 import * as ind from "./indicators.ts";
 import { DEFAULT_CONFIG, TradingEngine } from "./engine.ts";
-import { BinanceMarket } from "./market.ts";
+import { BinanceMarket, DataClient, mainnetData, TESTNET } from "./market.ts";
 import type { MarketData } from "./market.ts";
 import { BrowserKV, Repo } from "./repo.ts";
+import { SignedWsApi } from "./signed.ts";
+import { TestnetBroker } from "./testnet.ts";
+import type { Mode } from "./types.ts";
 import { ReplayMarket, replayCandle, syntheticFilters, syntheticSeries } from "./replay.ts";
-import { HARD_LIMITS, RiskSettingsError } from "./risk.ts";
+import { feeRate, HARD_LIMITS, RiskSettingsError } from "./risk.ts";
 import { TIMEFRAMES } from "./types.ts";
 import type { TF } from "./types.ts";
 
@@ -32,16 +35,41 @@ export interface Runtime {
   market: MarketData;
   repo: Repo;
   demo: boolean;
+  mode: Mode;
   stop(): void;
 }
 
 let current: Runtime | null = null;
+const settingsKV = new BrowserKV("cta-config:");
+
+export function savedMode(): Mode {
+  const m = settingsKV.get("mode");
+  return m === "TESTNET" ? "TESTNET" : "SIMULACAO";
+}
+
+export function testnetKeys(): { apiKey: string; secret: string } | null {
+  const apiKey = settingsKV.get("testnet_api_key") ?? "";
+  const secret = settingsKV.get("testnet_secret") ?? "";
+  return apiKey && secret ? { apiKey, secret } : null;
+}
+
+/** Laço do robô: um ciclo por segundo, nunca dois ao mesmo tempo. */
+function loop(engine: TradingEngine, tick: () => Promise<void>, everyMs: number): () => void {
+  let busy = false;
+  const id = window.setInterval(async () => {
+    if (busy) return;
+    busy = true;
+    try { await tick(); } catch (e) { engine.lastError = String(e); engine.risk.recordError(engine.clock()); }
+    finally { busy = false; }
+  }, everyMs);
+  return () => clearInterval(id);
+}
 
 /** Cria (uma única vez) o robô dentro do app. `demo` usa dados SINTÉTICOS acelerados, só para testar a tela. */
 export function getRuntime(demo = false): Runtime {
   if (current) return current;
-  const repo = new Repo(new BrowserKV(demo ? "cta-demo:" : "cta:"));
   if (demo) {
+    const repo = new Repo(new BrowserKV("cta-demo:"));
     const n = 14_400;
     const series = {
       BTCUSDT: syntheticSeries(n, 97_000, 3), ETHUSDT: syntheticSeries(n, 3_400, 5), SOLUSDT: syntheticSeries(n, 180, 9),
@@ -57,19 +85,50 @@ export function getRuntime(demo = false): Runtime {
     m.setPrices(i - 1, "close", series.BTCUSDT[i - 1].closeTime / 1000);
     const engine = new TradingEngine({ ...DEFAULT_CONFIG, symbols: Object.keys(series), initialCapitalBrl: 100 }, repo, m,
       { clock: () => m.now });
-    const timer = window.setInterval(() => { if (i < n) replayCandle(m, engine, i++); }, 400);
-    current = { engine, market: m, repo, demo, stop: () => clearInterval(timer) };
-  } else {
-    const symbols = repo.kvGet<string[]>("symbols", DEFAULT_CONFIG.symbols);
-    const market = new BinanceMarket(symbols, DEFAULT_CONFIG.quoteAsset, DEFAULT_CONFIG.brlRateSymbol);
-    const engine = new TradingEngine({ ...DEFAULT_CONFIG, symbols }, repo, market);
-    market.start();
-    const timer = window.setInterval(() => {
-      try { engine.step(); } catch (e) { engine.lastError = String(e); engine.risk.recordError(Date.now() / 1000); }
-    }, 1000);
-    current = { engine, market, repo, demo, stop: () => { clearInterval(timer); market.stop(); } };
+    const stop = loop(engine, async () => { if (i < n) await replayCandle(m, engine, i++); }, 400);
+    current = { engine, market: m, repo, demo, mode: "SIMULACAO", stop };
+    return current;
   }
+  const mode = savedMode();
+  const keys = testnetKeys();
+  if (mode === "TESTNET" && keys) {
+    const repo = new Repo(new BrowserKV("cta-testnet:"));
+    const symbols = repo.kvGet<string[]>("symbols", DEFAULT_CONFIG.symbols);
+    const market = new BinanceMarket(symbols, DEFAULT_CONFIG.quoteAsset, DEFAULT_CONFIG.brlRateSymbol,
+      { client: new DataClient(TESTNET), brlClient: mainnetData, dropMissing: true });
+    const api = new SignedWsApi(TESTNET.wsApiUrl, keys.apiKey, keys.secret);
+    const broker = new TestnetBroker(repo, api, 0.001);
+    const engine = new TradingEngine({ ...DEFAULT_CONFIG, symbols }, repo, market, { broker });
+    broker.updateCosts(feeRate(engine.riskSettings));
+    market.start().then(() => {
+      engine.cfg.symbols = [...market.symbols];
+      if (market.removed.length) {
+        const msg = `Pares fora da Testnet retirados da análise: ${market.removed.join(", ")}`;
+        repo.log("AVISO", "mercado", msg, null, Date.now() / 1000);
+        engine.brain.think(Date.now() / 1000, "info", msg);
+      }
+    });
+    const stopLoop = loop(engine, () => engine.step(), 1000);
+    current = { engine, market, repo, demo, mode, stop: () => { stopLoop(); market.stop(); api.close(); } };
+    return current;
+  }
+  const repo = new Repo(new BrowserKV("cta:"));
+  const symbols = repo.kvGet<string[]>("symbols", DEFAULT_CONFIG.symbols);
+  const market = new BinanceMarket(symbols, DEFAULT_CONFIG.quoteAsset, DEFAULT_CONFIG.brlRateSymbol);
+  const engine = new TradingEngine({ ...DEFAULT_CONFIG, symbols }, repo, market);
+  market.start();
+  const stopLoop = loop(engine, () => engine.step(), 1000);
+  current = { engine, market, repo, demo, mode: "SIMULACAO", stop: () => { stopLoop(); market.stop(); } };
   return current;
+}
+
+/** Troca de modo: só sem posições abertas (nenhuma operação fica sem acompanhamento). */
+function switchMode(rt: Runtime, mode: Mode) {
+  if (rt.engine.positions.size) throw new LocalApiError(409, "Há posições abertas. Espere fechar (ou use Emergência) antes de trocar de modo.");
+  rt.engine.pause(undefined, `Modo alterado para ${mode}`);
+  rt.stop();
+  settingsKV.set("mode", mode);
+  current = null;
 }
 
 function candlesPayload(rt: Runtime, symbol: string, tf: TF, limit: number) {
@@ -148,7 +207,7 @@ export async function localApi(path: string, method = "GET", body: Record<string
   switch (route) {
     case "GET /api/dashboard":
       return { ...e.snapshot(), recent_trades: rt.repo.closedPositions({ limit: 10, mode: e.mode }),
-        ai_enabled: !!rt.repo.kvGet<string>("ai_key", ""), release: { testnet: false, real: false }, demo: rt.demo };
+        ai_enabled: !!rt.repo.kvGet<string>("ai_key", ""), release: { testnet: true, real: false }, demo: rt.demo };
     case "GET /api/candles": return candlesPayload(rt, q("symbol").toUpperCase(), q("tf", "5m") as TF, Number(q("limit", "120")));
     case "GET /api/trades": return rt.repo.allPositions(Number(q("limit", "50")), e.mode);
     case "GET /api/decisions": return rt.repo.recentDecisions(Number(q("limit", "50")), q("only_rejected") === "true");
@@ -161,7 +220,7 @@ export async function localApi(path: string, method = "GET", body: Record<string
     case "POST /api/bot/pause": e.pause(); return { status: e.status };
     case "POST /api/bot/emergency":
       if (String(body.confirm ?? "").trim().toUpperCase() !== "PARAR") throw new LocalApiError(400, "Confirme digitando PARAR");
-      return e.emergencyStop();
+      return await e.emergencyStop();
     case "GET /api/settings/risk": return { settings: e.riskSettings, limits: riskLimits() };
     case "PUT /api/settings/risk":
       try { return { settings: e.updateRiskSettings(body), limits: riskLimits() }; }
@@ -172,13 +231,63 @@ export async function localApi(path: string, method = "GET", body: Record<string
       return { ok: true };
     case "GET /api/mode":
       return {
-        current: e.mode, confirmation_phrase: "EU AUTORIZO OPERAR COM DINHEIRO REAL",
+        current: rt.mode, confirmation_phrase: "EU AUTORIZO OPERAR COM DINHEIRO REAL", testnet_keys: !!testnetKeys(),
         modes: [
-          { mode: "SIMULACAO", available: true, label: "Simulação (paper trading)", detail: "Dados reais de mercado, dinheiro fictício. Modo atual." },
-          { mode: "TESTNET", available: false, label: "Testnet Binance", detail: "Bloqueado: liberação prevista na ETAPA 9." },
+          { mode: "SIMULACAO", available: true, label: "Simulação (paper trading)", detail: "Dados reais de mercado, dinheiro fictício, nada é enviado à corretora." },
+          { mode: "TESTNET", available: !!testnetKeys(), label: "Testnet Binance",
+            detail: testnetKeys() ? "Ordens de verdade no ambiente de TESTES da Binance (dinheiro fictício). Stop registrado na corretora."
+              : "Cadastre a chave da Testnet abaixo para liberar." },
           { mode: "REAL", available: false, label: "Real (dinheiro verdadeiro)", detail: "Bloqueado. Exige a ETAPA 10 e sua autorização explícita." },
         ],
       };
+    case "POST /api/mode": {
+      const target = String(body.mode ?? "").toUpperCase();
+      if (rt.demo) throw new LocalApiError(409, "No modo demonstração não é possível trocar de modo.");
+      if (target === "REAL") throw new LocalApiError(403, "Modo REAL bloqueado. Exige a ETAPA 10 e sua autorização explícita.");
+      if (target === rt.mode) return { current: rt.mode };
+      if (target === "TESTNET") {
+        if (!testnetKeys()) throw new LocalApiError(409, "Cadastre e teste a chave da Testnet primeiro.");
+        if (String(body.confirm ?? "").trim().toUpperCase() !== "TESTNET") throw new LocalApiError(400, "Confirme digitando TESTNET");
+        switchMode(rt, "TESTNET");
+      } else if (target === "SIMULACAO") switchMode(rt, "SIMULACAO");
+      else throw new LocalApiError(400, "Modo inválido");
+      getRuntime(false);
+      return { current: savedMode() };
+    }
+    case "GET /api/testnet/keys": {
+      const k = testnetKeys();
+      return { configured: !!k, api_key: k ? `${k.apiKey.slice(0, 6)}…${k.apiKey.slice(-4)}` : null };
+    }
+    case "PUT /api/testnet/keys": {
+      const apiKey = String(body.api_key ?? "").trim();
+      const secret = String(body.secret ?? "").trim();
+      if (!apiKey && !secret) {
+        if (rt.mode === "TESTNET") throw new LocalApiError(409, "Volte para a Simulação antes de remover a chave.");
+        settingsKV.remove("testnet_api_key"); settingsKV.remove("testnet_secret");
+        return { configured: false };
+      }
+      if (!/^[A-Za-z0-9]{20,128}$/.test(apiKey) || !/^[A-Za-z0-9]{20,128}$/.test(secret))
+        throw new LocalApiError(400, "Chave ou segredo em formato inválido (copie exatamente o que a Testnet mostrou).");
+      settingsKV.set("testnet_api_key", apiKey);
+      settingsKV.set("testnet_secret", secret);
+      return { configured: true };
+    }
+    case "POST /api/testnet/test": {
+      const k = testnetKeys();
+      if (!k) throw new LocalApiError(409, "Cadastre a chave da Testnet primeiro.");
+      const api = new SignedWsApi(TESTNET.wsApiUrl, k.apiKey, k.secret);
+      try {
+        const acc = await api.call("account.status", { omitZeroBalances: true }, true);
+        const bal = (acc.balances ?? []) as { asset: string; free: string }[];
+        const usdt = Number(bal.find((b) => b.asset === "USDT")?.free ?? 0);
+        return { ok: true, can_trade: acc.canTrade !== false, usdt_free: usdt,
+          balances: bal.slice(0, 8).map((b) => ({ asset: b.asset, free: Number(b.free) })) };
+      } catch (err) {
+        throw new LocalApiError(400, `Falha ao conectar na Testnet: ${err instanceof Error ? err.message : err}`);
+      } finally {
+        api.close();
+      }
+    }
     case "GET /api/ai/reports": return { enabled: !!rt.repo.kvGet<string>("ai_key", ""), model: AI_MODEL, reports: rt.repo.recentAiReports(10) };
     case "PUT /api/ai/key": {
       const key = String(body.key ?? "").trim();

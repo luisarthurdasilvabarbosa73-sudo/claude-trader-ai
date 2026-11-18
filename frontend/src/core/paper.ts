@@ -4,6 +4,7 @@
 // rejeição por filtros como a Binance faria e idempotência por client_order_id.
 import { roundQty, validateMarketOrder } from "./filters.ts";
 import type { SymbolFilters } from "./filters.ts";
+import type { Broker } from "./broker.ts";
 import type { Repo } from "./repo.ts";
 import type { Book, Fill } from "./types.ts";
 
@@ -12,9 +13,9 @@ export class OrderRejected extends Error {}
 const STATE_KEY = "paper_account";
 const clean = (v: number) => Math.round(v * 1e12) / 1e12;
 
-export class PaperBroker {
+export class PaperBroker implements Broker {
   readonly mode = "SIMULACAO" as const;
-  readonly isReal = false;
+  readonly sendsOrders = false;
   repo: Repo;
   feeRate: number;
   slippage: number;

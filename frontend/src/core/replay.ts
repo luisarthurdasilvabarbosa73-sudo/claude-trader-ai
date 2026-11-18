@@ -67,11 +67,11 @@ export class ReplayMarket implements MarketData {
 }
 
 /** Ciclo idêntico ao do backtest Python: abertura -> mínima -> máxima -> fechamento. */
-export function replayCandle(m: ReplayMarket, engine: { step(now: number): void }, i: number) {
+export async function replayCandle(m: ReplayMarket, engine: { step(now: number): void | Promise<void> }, i: number) {
   const t = m.series[m.symbols[0]][i].openTime / 1000;
   for (const [which, off] of [["open", 1], ["low", 20], ["high", 40], ["close", 59]] as const) {
     m.setPrices(i, which, t + off);
-    engine.step(t + off);
+    await engine.step(t + off);
   }
   m.pushClosed(i);
 }

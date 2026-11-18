@@ -80,4 +80,6 @@ export const EXIT_LABEL: Record<string, string> = {
   TEMPO_MAXIMO: "Tempo máximo",
   TENDENCIA_INVALIDADA: "Tendência invalidada",
   EMERGENCIA: "Emergência",
+  STOP_CORRETORA: "Stop na corretora",
+  SEM_PROTECAO: "Sem stop na corretora",
 };

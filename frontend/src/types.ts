@@ -171,6 +171,7 @@ export interface RiskResponse { settings: RiskSettings; limits: Record<string, {
 
 export interface ModeInfo {
   current: string;
+  testnet_keys?: boolean;
   modes: { mode: string; available: boolean; label: string; detail: string }[];
   confirmation_phrase: string;
 }

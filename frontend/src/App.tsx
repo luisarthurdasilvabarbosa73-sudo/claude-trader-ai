@@ -118,7 +118,7 @@ export function App() {
         </div>
         <div className="top-right">
           {d && <StatusPill status={d.status} />}
-          {d && <span className="pill mode">{d.mode === "SIMULACAO" ? "Simulação" : d.mode}</span>}
+          {d && <span className={`pill ${d.mode === "TESTNET" ? "pause" : "mode"}`}>{d.mode === "SIMULACAO" ? "Simulação" : d.mode === "TESTNET" ? "Testnet" : d.mode}</span>}
         </div>
       </header>
 
@@ -136,7 +136,7 @@ export function App() {
             {tab === "cerebro" && <Brain d={d} />}
             {tab === "grafico" && <ChartView d={d} />}
             {tab === "historico" && <History symbols={d.symbols} />}
-            {tab === "ajustes" && <Settings d={d} notify={notify} onToast={showToast} />}
+            {tab === "ajustes" && <Settings d={d} notify={notify} onToast={showToast} onChanged={() => { setD(null); refresh(); }} />}
           </>
         )}
       </main>

@@ -39,7 +39,7 @@ export function filtersFromExchangeInfo(info: any): SymbolFilters {
   return f;
 }
 
-function decimals(step: string): number {
+export function stepDecimals(step: string): number {
   const s = step.includes("e-") ? Number(step).toFixed(20) : step;
   const i = s.indexOf(".");
   if (i < 0) return 0;
@@ -50,7 +50,7 @@ function decimals(step: string): number {
 export function floorStep(value: number, step: string): number {
   const st = Number(step);
   if (!(st > 0) || !(value > 0)) return value > 0 ? value : 0;
-  const d = decimals(step);
+  const d = stepDecimals(step);
   const factor = 10 ** d;
   const stepInt = Math.round(st * factor);
   const units = Math.floor(value * factor * (1 + 1e-12) + 1e-7);
@@ -60,7 +60,7 @@ export function floorStep(value: number, step: string): number {
 export function ceilStep(value: number, step: string): number {
   const st = Number(step);
   if (!(st > 0)) return value;
-  const d = decimals(step);
+  const d = stepDecimals(step);
   const factor = 10 ** d;
   const stepInt = Math.round(st * factor);
   const units = Math.ceil(value * factor * (1 - 1e-12) - 1e-7);

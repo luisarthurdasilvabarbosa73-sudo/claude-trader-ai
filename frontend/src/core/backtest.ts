@@ -138,7 +138,7 @@ export async function simulate(series: Record<string, Candle[]>, filters: Record
       await tick();
     }
     const t = first[i].openTime / 1000;
-    replayCandle(m, engine, i);
+    await replayCandle(m, engine, i);
     for (const d of Object.values(engine.brain.latest)) {
       if (d.ts === t + 1 && d.signal === "COMPRAR") {
         signals += 1;

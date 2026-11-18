@@ -77,6 +77,9 @@ export interface Position {
   pnl_pct: number | null;
   r_multiple: number | null;
   notes: string[];
+  /** Testnet: ID do stop-loss registrado na corretora. */
+  protect_order_id?: string | null;
+  protect_failures?: number;
 }
 
 export function candle(openTime: number, o: number, h: number, l: number, c: number, v = 1, closed = true): Candle {
