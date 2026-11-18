@@ -21,6 +21,10 @@ export function Panel({ d, onAction }: {
 
   return (
     <>
+      <div className="banner info">
+        O robô roda dentro deste app: ele analisa e opera enquanto o app estiver aberto na tela
+        (a tela fica ligada automaticamente). Fechou o app, ele para — o histórico fica salvo no celular.
+      </div>
       {!d.account.initialized && (
         <div className="banner warn">Conta simulada aguardando a cotação real USDT/BRL para converter R$30. Nenhum valor é inventado.</div>
       )}
@@ -63,7 +67,7 @@ export function Panel({ d, onAction }: {
         <Stat label="Perdedoras" toneClass={d.totals.losses ? "neg" : "neu"} value={d.totals.losses} hint={`${t.losses} hoje`} />
         <Stat label="Taxa de acerto" value={d.totals.win_rate === null ? "—" : pct(d.totals.win_rate, 1)}
           hint={d.totals.trades < 30 ? "amostra pequena" : `PF ${num(d.totals.profit_factor)}`} />
-        <Stat label="Estado do robô" value={<StatusPill status={d.status} />} hint={`ativo há ${duration(d.uptime_s)}`} />
+        <Stat label="Estado do robô" value={<StatusPill status={d.status} />} hint={`app aberto há ${duration(d.uptime_s)}`} />
         <Stat label="Modo de operação" value={<span className="accent" style={{ fontSize: 15 }}>{d.mode === "SIMULACAO" ? "SIMULAÇÃO" : d.mode}</span>} hint="sem dinheiro real" />
       </div>
 

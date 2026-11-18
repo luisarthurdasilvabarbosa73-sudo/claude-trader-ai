@@ -1,4 +1,19 @@
-# Relatório de testes — Primeira missão (17/11/2026)
+# Relatório de testes
+
+## Atualização (17/11/2026, noite) — robô dentro do app
+- **10 testes do motor do app** (TypeScript, `npm test`): RSI de referência, arredondamento de lote,
+  limites rígidos, R$30 (poeira e risco), simulador, robô parado não entra, ciclo completo sem
+  duplicidade + emergência, dados desatualizados, histórico restaurado ao reabrir.
+- **Paridade com o Python:** mesmos dados sintéticos (2 ativos, 1.200 minutos) → **2.400 decisões
+  idênticas, 7 operações idênticas e o mesmo patrimônio final** (diferença < 0,000001).
+- **Navegador (Chrome, tela de celular, endereço no formato do GitHub Pages):**
+  - modo real sem internet → mostra o erro com clareza e não cria saldo sem cotação real;
+  - modo demonstração → iniciar, operações simuladas, 5 telas, risco de 50% recusado, emergência,
+    histórico mantido após recarregar, service worker ativo.
+- Não testado ainda: conexão real com a Binance a partir do celular (o ambiente de construção não
+  tem internet) — será confirmada assim que você abrir o app.
+
+## Primeira missão
 
 ## Resultado: 97 testes aprovados, 1 pulado, 0 falhas
 

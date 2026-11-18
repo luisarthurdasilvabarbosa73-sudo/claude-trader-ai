@@ -1,52 +1,39 @@
 # Arquitetura
 
-```
- Android (Chrome)                         Nuvem (1 contêiner, região fora dos EUA)
- ┌──────────────────┐   HTTPS + token    ┌───────────────────────────────────────────┐
- │ App PWA          │ ─────────────────▶ │ FastAPI  ──  ApiService                    │
- │ Painel / Cérebro │ ◀───────────────── │             │                              │
- │ Gráfico / Ajustes│   JSON (3 s)       │   TradingEngine (loop 1 s, independente)   │
- └──────────────────┘                    │    ├─ Strategy (indicadores + pontuação)   │
-                                         │    ├─ RiskManager + capital.py             │
-                                         │    ├─ PaperBroker (SIMULAÇÃO)               │
-                                         │    │   LiveBroker (TESTNET/REAL 🔒)         │
-                                         │    └─ Brain (explicações)                   │
-                                         │   BinanceMarketData                         │
-                                         │    ├─ REST data-api.binance.vision          │
-                                         │    └─ WebSocket data-stream.binance.vision  │
-                                         │   SQLite em volume persistente (/data)      │
-                                         │   ClaudeAdvisor (opcional, sob demanda)     │
-                                         └───────────────────────────────────────────┘
-```
+## Decisão: o robô roda no celular (sem servidor)
+O proprietário escolheu não usar servidor nem pagar hospedagem e acompanhar o robô enquanto ele roda.
+Por isso o motor (estratégia, risco, simulação e conexão com a Binance) roda **dentro do app**, no Chrome
+do Android. O app é publicado de graça no GitHub Pages e instalado na tela inicial (PWA).
 
-## Decisões técnicas
+```
+ Celular                                         Binance (endpoints oficiais de dados públicos)
+ ┌──────────────────────────────────────────┐   REST data-api.binance.vision (+ api.binance.com)
+ │ Telas React ─▶ runtime.ts (rotas locais)  │◀▶ WebSocket data-stream.binance.vision (tempo real)
+ │                 └▶ TradingEngine (1 s)    │   Plano B: API WebSocket ws-api.binance.com
+ │                     ├ Strategy (score)    │
+ │                     ├ RiskManager/capital │   GitHub Actions: testes Python + testes do app
+ │                     ├ PaperBroker         │   + PARIDADE (app decide igual ao Python) + Pages
+ │                     └ Brain (explicações) │
+ │ localStorage: ordens, posições, decisões  │
+ └──────────────────────────────────────────┘
+```
 
 | Tema | Escolha | Motivo |
 |---|---|---|
-| Linguagem do robô | Python 3.12 | legível, ótimo para cálculo e testes |
-| API | FastAPI + Uvicorn | assíncrono, validação de entrada, padrão de mercado |
-| Indicadores | implementação própria em Python puro | sem dependências opacas; cada fórmula testada |
-| Banco | SQLite (modo WAL) em volume | um único robô não precisa de servidor de banco; zero custo extra |
-| Dados de mercado | endpoints oficiais `data-api` / `data-stream` da Binance | domínios oficiais só de dados públicos; não exigem chave |
-| App | React + TypeScript + Vite, PWA | instala pelo Chrome, sem loja e sem Termux |
-| Gráficos | SVG próprio | sem biblioteca externa; leve no celular |
-| Hospedagem (ETAPA 8) | Railway, região **EU West (Amsterdã)** ou **Singapura** | deploy pelo navegador a partir do GitHub, volume persistente, reinício automático |
+| Robô ao vivo | TypeScript em `frontend/src/core` | roda no navegador do celular, sem instalar nada |
+| Referência e backtest | Python em `backend/` | testado (97 testes) e usado para backtest com dados reais |
+| Garantia de que os dois são iguais | teste de **paridade** no CI | mesmos dados → mesmas 2.400 decisões e mesmas operações |
+| Armazenamento | localStorage do aparelho, com limites de tamanho | sem servidor; histórico sobrevive a fechar o app |
+| App | React + TypeScript + Vite, PWA | instala pela tela inicial, abre em tela cheia |
+| Publicação | GitHub Pages | grátis, HTTPS, atualiza a cada envio ao GitHub |
+| Segurança do app | Content-Security-Policy restrita (só Binance e API do Claude) | reduz risco de código malicioso |
 
-### Por que não rodar nos EUA
-A Binance responde **HTTP 451** para servidores em locais restritos (como os EUA). O sistema detecta isso,
-mostra o aviso no app e não opera. Por isso a região do servidor deve ser Europa ou Ásia.
-
-### Custo estimado
-O plano Hobby do Railway custa US$5/mês e inclui US$5 de uso (fonte: docs.railway.com/reference/pricing).
-Um serviço pequeno sempre ligado normalmente cabe nesse valor, mas **confira no painel**. Atenção: US$5/mês
-é praticamente o valor do capital de R$30 — ver [RISCO_E_CAPITAL.md](RISCO_E_CAPITAL.md).
+## Consequências (honestas)
+- O robô só funciona com o app aberto na tela (a tela fica ligada automaticamente enquanto opera).
+- Se o app ficar fechado com posição aberta, ela só é reavaliada ao reabrir, pelo preço daquele momento.
+- **Dinheiro real** exigirá revisar esta arquitetura: a regra do projeto proíbe guardar a chave da
+  Binance no aparelho. O `backend/` (FastAPI) continua no repositório como base para um servidor futuro.
 
 ## Separação simulação × execução real
-- `execution/paper.py` não importa cliente assinado nem credenciais (há teste que garante isso).
-- `execution/live.py` só pode ser instanciado se `TESTNET_RELEASED`/`REAL_RELEASED` forem `True` em
-  `config.py` — hoje ambos são `False`. Nenhuma variável de ambiente, rota da API ou resposta da IA muda isso.
-
-## Reinício seguro
-Estado do robô, conta simulada, posições abertas, estado de risco e todas as ordens ficam no banco.
-Ao reiniciar: restaura tudo, espera dados novos e só retoma se estava RODANDO (`AUTO_RESUME=true`).
-EMERGÊNCIA nunca é retomada automaticamente.
+O app só contém o simulador (`paper.ts`). Não existe código de envio de ordens reais no app.
+No `backend/`, `execution/live.py` continua travado por `TESTNET_RELEASED`/`REAL_RELEASED = False`.

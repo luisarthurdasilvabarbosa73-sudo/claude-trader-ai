@@ -138,6 +138,7 @@ export interface Dashboard {
   };
   ai_enabled: boolean;
   release: { testnet: boolean; real: boolean };
+  demo?: boolean;
 }
 
 export interface CandleDTO { t: number; o: number; h: number; l: number; c: number; v: number; closed: boolean }

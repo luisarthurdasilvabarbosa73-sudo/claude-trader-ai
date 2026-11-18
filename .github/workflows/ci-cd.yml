@@ -1,20 +1,19 @@
-# CLAUDE TRADER AI — automação no GitHub (tudo pelo navegador, sem computador).
-#
-# 1) Ao enviar "claude-trader-ai.zip" para o repositório, este fluxo descompacta
-#    o projeto e faz o commit dos arquivos automaticamente.
-# 2) Em seguida roda os testes do robô, compila o app e valida a imagem Docker.
-# 3) Manualmente (aba Actions > "Run workflow"), roda um BACKTEST com dados reais.
+# CLAUDE TRADER AI — automação no GitHub (tudo pelo navegador).
+# A cada envio: testa o motor Python (referência), testa o motor do app, confere se os dois
+# decidem igual (paridade), compila o app e publica no GitHub Pages.
+# Manualmente (Actions > Run workflow > backtest): backtest com dados históricos reais.
 name: CLAUDE TRADER AI
 
 on:
   push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       tarefa:
         description: "O que executar"
         type: choice
-        options: [testes, backtest]
-        default: testes
+        options: [publicar, backtest]
+        default: publicar
       simbolos:
         description: "Pares para o backtest"
         default: "SOLUSDT,XRPUSDT,ADAUSDT"
@@ -29,91 +28,77 @@ on:
         default: "30"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: cta-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
-  descompactar:
-    runs-on: ubuntu-latest
-    outputs:
-      pronto: ${{ steps.verifica.outputs.pronto }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Descompactar projeto enviado (.zip)
-        run: |
-          if [ -f claude-trader-ai.zip ]; then
-            unzip -o claude-trader-ai.zip -d .
-            rm -f claude-trader-ai.zip
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -A
-            git commit -m "Projeto CLAUDE TRADER AI descompactado" || echo "Nada novo para salvar"
-            git push
-          else
-            echo "Nenhum .zip para descompactar."
-          fi
-      - name: Verificar se o projeto já está no repositório
-        id: verifica
-        run: |
-          if [ -f backend/requirements.txt ]; then echo "pronto=true" >> "$GITHUB_OUTPUT";
-          else echo "pronto=false" >> "$GITHUB_OUTPUT"; echo "Envie o claude-trader-ai.zip (Passo 3)."; fi
-
-  testes-backend:
-    needs: descompactar
-    if: ${{ needs.descompactar.outputs.pronto == 'true' && inputs.tarefa != 'backtest' }}
+  testes-python:
+    if: ${{ inputs.tarefa != 'backtest' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref_name }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Instalar dependências
-        run: pip install -r backend/requirements-dev.txt
-      - name: Rodar testes automatizados
+      - run: pip install -r backend/requirements-dev.txt
+      - name: Testes do motor de referência (Python)
         working-directory: backend
         run: python -m pytest -q -rs
 
-  build-app:
-    needs: descompactar
-    if: ${{ needs.descompactar.outputs.pronto == 'true' && inputs.tarefa != 'backtest' }}
+  app:
+    if: ${{ inputs.tarefa != 'backtest' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          ref: ${{ github.ref_name }}
+          python-version: "3.12"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Verificar tipos e compilar o PWA
-        working-directory: frontend
+      - name: Gerar dados de paridade com o motor Python
         run: |
-          npm install --no-audit --no-fund
-          npm run build
-
-  docker:
-    needs: [testes-backend, build-app]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+          pip install -r backend/requirements.txt
+          python backend/scripts/gerar_paridade.py /tmp/paridade.json
+      - name: Instalar dependências do app
+        working-directory: frontend
+        run: npm install --no-audit --no-fund
+      - name: Testes do motor do app + paridade com o Python
+        working-directory: frontend
+        env:
+          PARIDADE: /tmp/paridade.json
+        run: npm test
+      - name: Verificar tipos e compilar o app
+        working-directory: frontend
+        run: npm run build
+      - uses: actions/upload-pages-artifact@v3
         with:
-          ref: ${{ github.ref_name }}
-      - name: Montar a imagem Docker de produção
-        run: docker build -t claude-trader-ai .
+          path: frontend/dist
+
+  publicar:
+    needs: [testes-python, app]
+    if: ${{ github.ref == 'refs/heads/main' && inputs.tarefa != 'backtest' }}
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Publicar no GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
 
   backtest:
-    needs: descompactar
-    if: ${{ needs.descompactar.outputs.pronto == 'true' && github.event_name == 'workflow_dispatch' && inputs.tarefa == 'backtest' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.tarefa == 'backtest' }}
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref_name }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

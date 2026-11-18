@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { api, ApiError, getToken, setToken } from "./api";
+import { api } from "./api";
 import type { Dashboard, Thought } from "./types";
 import { Brain } from "./components/Brain";
 import { ChartView } from "./components/ChartView";
 import { History } from "./components/History";
-import { Login } from "./components/Login";
 import { Panel } from "./components/Panel";
 import { Settings } from "./components/Settings";
 import { Icons, StatusPill } from "./components/ui";
@@ -33,7 +32,7 @@ function useNotifications(thoughts: Thought[] | undefined) {
     navigator.serviceWorker?.ready.then((reg) => {
       for (const t of fresh.slice(0, 3)) {
         const title = t.kind === "aceita" ? "Compra (simulada)" : t.kind === "saida" ? "Operação encerrada" : "Alerta de risco";
-        reg.showNotification(`CLAUDE TRADER AI · ${title}`, { body: t.text.slice(0, 180), icon: "/icons/icon-192.png", tag: `${t.ts}` });
+        reg.showNotification(`CLAUDE TRADER AI · ${title}`, { body: t.text.slice(0, 180), icon: "./icons/icon-192.png", tag: `${t.ts}` });
       }
     }).catch(() => undefined);
   }, [thoughts, permission]);
@@ -46,11 +45,29 @@ function useNotifications(thoughts: Thought[] | undefined) {
   return { permission, enable };
 }
 
+/** Mantém a tela ligada enquanto o robô opera (o robô só funciona com o app aberto). */
+function useWakeLock(active: boolean) {
+  useEffect(() => {
+    if (!active || !("wakeLock" in navigator)) return;
+    let lock: WakeLockSentinel | null = null;
+    let cancelled = false;
+    const acquire = async () => {
+      try {
+        if (document.visibilityState === "visible") lock = await navigator.wakeLock.request("screen");
+        if (cancelled) lock?.release();
+      } catch { /* sem permissão: segue sem trava de tela */ }
+    };
+    acquire();
+    const onVis = () => { if (document.visibilityState === "visible") acquire(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { cancelled = true; document.removeEventListener("visibilitychange", onVis); lock?.release().catch(() => undefined); };
+  }, [active]);
+}
+
 export function App() {
-  const [logged, setLogged] = useState<boolean>(!!getToken());
   const [tab, setTab] = useState<Tab>("painel");
   const [d, setD] = useState<Dashboard | null>(null);
-  const [offline, setOffline] = useState(false);
+  const [error, setError] = useState("");
   const [toast, setToast] = useState<{ msg: string; err: boolean } | null>(null);
 
   const showToast = useCallback((msg: string, err = false) => {
@@ -61,26 +78,21 @@ export function App() {
   const refresh = useCallback(async () => {
     try {
       setD(await api<Dashboard>("/api/dashboard"));
-      setOffline(false);
+      setError("");
     } catch (e) {
-      if (e instanceof ApiError && e.status === 0) setOffline(true);
+      setError(e instanceof Error ? e.message : String(e));
     }
   }, []);
 
   useEffect(() => {
-    const out = () => { setLogged(false); setD(null); };
-    window.addEventListener("cta-logout", out);
-    return () => window.removeEventListener("cta-logout", out);
-  }, []);
-
-  useEffect(() => {
-    if (!logged) return;
     refresh();
-    const id = window.setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 3000);
+    const id = window.setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 2000);
     const onVis = () => { if (document.visibilityState === "visible") refresh(); };
     document.addEventListener("visibilitychange", onVis);
     return () => { window.clearInterval(id); document.removeEventListener("visibilitychange", onVis); };
-  }, [logged, refresh]);
+  }, [refresh]);
+
+  useWakeLock(d?.status === "RODANDO" || d?.status === "PAUSADO");
 
   const notify = useNotifications(d?.brain.thoughts);
 
@@ -94,8 +106,6 @@ export function App() {
     }
   }, [refresh, showToast]);
 
-  if (!logged) return <Login onLogged={() => setLogged(true)} />;
-
   return (
     <div className="app">
       <header className="topbar">
@@ -103,7 +113,7 @@ export function App() {
           <div className="brand-mark" />
           <div>
             <div className="brand-name">CLAUDE TRADER AI</div>
-            <div className="brand-sub">BINANCE SPOT · DAY TRADE</div>
+            <div className="brand-sub">BINANCE SPOT · NO SEU CELULAR</div>
           </div>
         </div>
         <div className="top-right">
@@ -113,21 +123,20 @@ export function App() {
       </header>
 
       {d?.synthetic_data && (
-        <div className="banner danger">⚠ DADOS SINTÉTICOS DE TESTE. Nada nesta tela é mercado real. Este modo é proibido em produção.</div>
+        <div className="banner danger">⚠ MODO DEMONSTRAÇÃO com dados SINTÉTICOS. Nada nesta tela é mercado real. Para usar o mercado real, abra o app sem "?demo=1".</div>
       )}
-      {offline && <div className="banner warn">Sem conexão com o servidor. Tentando novamente…</div>}
+      {error && <div className="banner warn">{error}</div>}
       {d?.health.fatal_error && <div className="banner danger">{d.health.fatal_error}</div>}
       {d && d.status_reason && d.status !== "RODANDO" && <div className="banner info">{d.status_reason}</div>}
 
       <main style={{ marginTop: 12 }}>
-        {!d ? <div className="empty">Conectando ao robô…</div> : (
+        {!d ? <div className="empty">Ligando o robô e conectando à Binance…</div> : (
           <>
             {tab === "painel" && <Panel d={d} onAction={action} />}
             {tab === "cerebro" && <Brain d={d} />}
             {tab === "grafico" && <ChartView d={d} />}
             {tab === "historico" && <History />}
-            {tab === "ajustes" && <Settings d={d} notify={notify} onToast={showToast}
-              onLogout={() => { setToken(null); setLogged(false); setD(null); }} />}
+            {tab === "ajustes" && <Settings d={d} notify={notify} onToast={showToast} />}
           </>
         )}
       </main>

@@ -49,4 +49,4 @@ o mesmo teste com R$100 executou 9 operações normalmente.
 - aumentar o capital simulado (`INITIAL_CAPITAL_BRL`) para ver como o robô se comporta com R$60–R$100;
 - monitorar ativos de lote barato (ex.: ADA, DOGE, TRX), alterando `SYMBOLS`.
 
-Lembre também que a hospedagem (~US$5/mês) custa aproximadamente o mesmo que o capital.
+Não há custo de hospedagem: o robô roda no próprio celular.

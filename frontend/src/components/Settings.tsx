@@ -8,6 +8,7 @@ const FIELDS: { key: string; label: string; unit: string; help: string }[] = [
   { key: "risk_per_trade_pct", label: "Risco máximo por operação", unit: "%", help: "Perda máxima planejada no stop, já com taxas." },
   { key: "max_daily_loss_pct", label: "Limite de perda diária", unit: "%", help: "Atingiu: novas entradas bloqueadas até amanhã." },
   { key: "max_open_positions", label: "Operações simultâneas", unit: "", help: "Com R$30, apenas 1 é viável." },
+  { key: "max_step_value_pct", label: "Valor máximo do lote", unit: "%", help: "Evita ativos cuja sobra (poeira) prenderia capital." },
   { key: "max_total_exposure_pct", label: "Exposição total máxima", unit: "%", help: "Parte do patrimônio que pode ficar em ativos." },
   { key: "min_score", label: "Pontuação mínima", unit: "", help: "Confirmações necessárias (0–100)." },
   { key: "min_reward_risk", label: "Risco/retorno líquido mínimo", unit: "x", help: "Após taxas e slippage." },
@@ -18,14 +19,15 @@ const FIELDS: { key: string; label: string; unit: string; help: string }[] = [
   { key: "slippage_pct", label: "Slippage simulado", unit: "%", help: "Além do spread real." },
 ];
 
-export function Settings({ d, notify, onLogout, onToast }: {
-  d: Dashboard; notify: { permission: string; enable: () => void }; onLogout: () => void; onToast: (m: string, err?: boolean) => void;
+export function Settings({ d, notify, onToast }: {
+  d: Dashboard; notify: { permission: string; enable: () => void }; onToast: (m: string, err?: boolean) => void;
 }) {
   const [risk, setRisk] = useState<RiskResponse | null>(null);
   const [form, setForm] = useState<Record<string, string>>({});
   const [modes, setModes] = useState<ModeInfo | null>(null);
   const [ai, setAi] = useState<AiReports | null>(null);
   const [question, setQuestion] = useState("");
+  const [aiKey, setAiKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [resetOpen, setResetOpen] = useState(false);
 
@@ -52,6 +54,17 @@ export function Settings({ d, notify, onLogout, onToast }: {
       onToast("Configurações de risco salvas");
     } catch (e) {
       onToast(e instanceof Error ? e.message : "Erro ao salvar", true);
+    }
+  }
+
+  async function saveKey(key: string) {
+    try {
+      await api("/api/ai/key", { method: "PUT", body: { key } });
+      setAi(await api<AiReports>("/api/ai/reports"));
+      setAiKey("");
+      onToast(key ? "Chave salva neste aparelho" : "Chave removida");
+    } catch (e) {
+      onToast(e instanceof Error ? e.message : "Erro", true);
     }
   }
 
@@ -115,7 +128,13 @@ export function Settings({ d, notify, onLogout, onToast }: {
       <SectionTitle>Análise estratégica (Claude)</SectionTitle>
       <Card>
         {!ai?.enabled ? (
-          <p className="small muted">Desativado. Para ativar, cadastre a variável <span className="mono">ANTHROPIC_API_KEY</span> no servidor. O robô opera normalmente sem a IA.</p>
+          <>
+            <p className="small muted">Opcional e pago à parte (API do Claude, console.anthropic.com). O robô opera normalmente sem a IA.
+              A chave fica salva só neste aparelho.</p>
+            <input className="input" type="password" placeholder="sk-ant-..." value={aiKey} onChange={(e) => setAiKey(e.target.value)} />
+            <div className="spacer" />
+            <button className="btn block" disabled={!aiKey} onClick={() => saveKey(aiKey)}>Salvar chave</button>
+          </>
         ) : (
           <>
             <textarea className="input" placeholder="Ex.: O mercado mudou de regime? Por que o robô não operou hoje?" value={question}
@@ -123,6 +142,7 @@ export function Settings({ d, notify, onLogout, onToast }: {
             <div className="spacer" />
             <button className="btn primary block" disabled={busy} onClick={askAi}>{busy ? "Analisando…" : "Pedir análise"}</button>
             <p className="dim tiny">A IA apenas analisa e sugere. Ela não altera limites, credenciais nem executa ordens.</p>
+            <button className="btn ghost sm" onClick={() => saveKey("")}>Remover chave</button>
           </>
         )}
         {(ai?.reports ?? []).map((r) => (
@@ -140,12 +160,10 @@ export function Settings({ d, notify, onLogout, onToast }: {
         <button className="btn block" onClick={() => setResetOpen(true)}>Zerar simulação (volta a R$30)</button>
       </Card>
 
-      <div className="spacer" />
-      <button className="btn ghost block" onClick={onLogout}>Sair</button>
 
       {resetOpen && (
         <ConfirmDialog title="Zerar a conta simulada?" word="ZERAR" confirmLabel="Zerar"
-          message="O histórico permanece registrado. A conta volta a R$30 na cotação real atual. Feche posições antes."
+          message="O histórico permanece salvo no celular. A conta volta a R$30 na cotação real atual. Feche posições antes."
           onClose={() => setResetOpen(false)}
           onConfirm={async (typed) => {
             setResetOpen(false);
