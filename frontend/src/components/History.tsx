@@ -2,11 +2,12 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { Decision, LogEvent, Position } from "../types";
 import { dateTime, EXIT_LABEL, num, pct, price, signed, tone } from "../format";
+import { BacktestPanel } from "./BacktestPanel";
 import { Card, Empty } from "./ui";
 
-type Tab = "operacoes" | "decisoes" | "eventos";
+type Tab = "operacoes" | "decisoes" | "eventos" | "backtest";
 
-export function History() {
+export function History({ symbols }: { symbols: string[] }) {
   const [tab, setTab] = useState<Tab>("operacoes");
   const [trades, setTrades] = useState<Position[]>([]);
   const [decisions, setDecisions] = useState<Decision[]>([]);
@@ -16,6 +17,7 @@ export function History() {
   useEffect(() => {
     let alive = true;
     const load = async () => {
+      if (tab === "backtest") return;
       try {
         if (tab === "operacoes") { const r = await api<Position[]>("/api/trades?limit=100"); if (alive) setTrades(r); }
         if (tab === "decisoes") {
@@ -36,6 +38,7 @@ export function History() {
         <button className={`chip ${tab === "operacoes" ? "on" : ""}`} onClick={() => setTab("operacoes")}>Operações</button>
         <button className={`chip ${tab === "decisoes" ? "on" : ""}`} onClick={() => setTab("decisoes")}>Decisões</button>
         <button className={`chip ${tab === "eventos" ? "on" : ""}`} onClick={() => setTab("eventos")}>Eventos</button>
+        <button className={`chip ${tab === "backtest" ? "on" : ""}`} onClick={() => setTab("backtest")}>Backtest</button>
       </div>
       <div className="spacer" />
 
@@ -75,6 +78,8 @@ export function History() {
           ))}
         </Card>
       )}
+
+      {tab === "backtest" && <BacktestPanel symbols={symbols} />}
 
       {tab === "eventos" && (
         <Card title="Eventos do sistema">

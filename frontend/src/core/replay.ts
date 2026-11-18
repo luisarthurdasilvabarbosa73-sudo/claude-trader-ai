@@ -106,7 +106,12 @@ export function syntheticSeries(n: number, startPrice: number, seed: number, dri
 }
 
 export function syntheticFilters(symbol: string, base: string, quote: string, tick = "0.01", step = "0.00001", minQty = "0.00001", minNotional = "5"): SymbolFilters {
-  return filtersFromExchangeInfo({
+  return filtersFromExchangeInfo(syntheticInfo(symbol, base, quote, tick, step, minQty, minNotional));
+}
+
+/** exchangeInfo no formato oficial da Binance (para testes). */
+export function syntheticInfo(symbol: string, base: string, quote: string, tick = "0.01", step = "0.00001", minQty = "0.00001", minNotional = "5") {
+  return {
     symbol, baseAsset: base, quoteAsset: quote, status: "TRADING", isSpotTradingAllowed: true, orderTypes: ["LIMIT", "MARKET"],
     filters: [
       { filterType: "PRICE_FILTER", minPrice: tick, maxPrice: "1000000", tickSize: tick },
@@ -114,5 +119,5 @@ export function syntheticFilters(symbol: string, base: string, quote: string, ti
       { filterType: "MARKET_LOT_SIZE", minQty: "0", maxQty: "100", stepSize: "0" },
       { filterType: "NOTIONAL", minNotional, applyMinToMarket: true, maxNotional: "9000000", applyMaxToMarket: false, avgPriceMins: 5 },
     ],
-  });
+  };
 }

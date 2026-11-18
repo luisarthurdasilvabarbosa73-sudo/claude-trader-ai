@@ -1,5 +1,17 @@
 # Relatório de testes
 
+## Atualização (18/11/2026) — backtest no app + modo real testado com Binance simulada
+- **13 testes do motor do app** (era 10): + backtest com download paginado (1000 minutos por página),
+  + estatística honesta, + o backtest do app reproduz as mesmas operações do motor Python.
+- **Modo real de ponta a ponta no Chrome**, com a Binance simulada no formato oficial (REST + WebSocket):
+  regras de negociação e histórico carregados (22 chamadas), conta criada pela cotação USDT/BRL,
+  ~2.000 mensagens ao vivo processadas, robô analisando a cada minuto fechado, nenhum erro no console.
+- **Backtest no app** (3 dias, 3 ativos, dados sintéticos): 8 s no navegador.
+  - R$30 → 293 sinais, **todos recusados por capital** (comportamento correto, explicado na tela);
+  - R$100 → 18 operações, resultado −6,2% em dados aleatórios (esperado: sem vantagem + custos) e veredito
+    "amostra pequena demais".
+- A CSP do app bloqueou execução de código via `eval` durante o teste — a proteção funciona.
+
 ## Atualização (17/11/2026, noite) — robô dentro do app
 - **10 testes do motor do app** (TypeScript, `npm test`): RSI de referência, arredondamento de lote,
   limites rígidos, R$30 (poeira e risco), simulador, robô parado não entra, ciclo completo sem

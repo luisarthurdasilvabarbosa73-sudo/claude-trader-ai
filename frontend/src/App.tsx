@@ -135,7 +135,7 @@ export function App() {
             {tab === "painel" && <Panel d={d} onAction={action} />}
             {tab === "cerebro" && <Brain d={d} />}
             {tab === "grafico" && <ChartView d={d} />}
-            {tab === "historico" && <History />}
+            {tab === "historico" && <History symbols={d.symbols} />}
             {tab === "ajustes" && <Settings d={d} notify={notify} onToast={showToast} />}
           </>
         )}

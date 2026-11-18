@@ -66,6 +66,69 @@ const WS_API_METHOD: Record<string, string> = {
 
 export class GeoBlocked extends Error {}
 
+/** Cliente de dados públicos da Binance: REST (com hosts reserva) e, se o navegador bloquear,
+ *  plano B pela API WebSocket oficial. Usado pelo robô ao vivo e pelo backtest. */
+export const client = { useWsApi: false, hostIndex: 0 };
+
+function wsApi(path: string, params: Record<string, string | number>): Promise<unknown> {
+  const method = WS_API_METHOD[path];
+  const p: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(params)) p[k] = k === "symbols" ? JSON.parse(String(v)) : v;
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(WS_API_URL);
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const timer = setTimeout(() => { ws.close(); reject(new Error("tempo esgotado na API WebSocket")); }, 15_000);
+    ws.onopen = () => ws.send(JSON.stringify({ id, method, params: p }));
+    ws.onmessage = (ev) => {
+      const msg = JSON.parse(String(ev.data));
+      if (msg.id !== id) return;
+      clearTimeout(timer);
+      ws.close();
+      if (msg.status === 451) reject(new GeoBlocked("A Binance bloqueou o acesso a partir da sua localização (HTTP 451)."));
+      else if (msg.status === 200) resolve(msg.result);
+      else reject(new Error(msg.error?.msg ?? `API WebSocket respondeu ${msg.status}`));
+    };
+    ws.onerror = () => { clearTimeout(timer); reject(new Error("falha na API WebSocket")); };
+  });
+}
+
+async function restHttp(path: string, params: Record<string, string | number>) {
+  const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString();
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt < REST_HOSTS.length; attempt++) {
+    const idx = (client.hostIndex + attempt) % REST_HOSTS.length;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 10_000);
+    try {
+      const res = await fetch(`${REST_HOSTS[idx]}${path}?${qs}`, { signal: ctrl.signal, cache: "no-store" });
+      if (res.status === 451) throw new GeoBlocked("A Binance bloqueou o acesso a partir da sua localização (HTTP 451).");
+      if (res.status === 429 || res.status === 418) throw new Error(`Limite de requisições da Binance (HTTP ${res.status})`);
+      if (!res.ok) throw new Error(`Binance respondeu HTTP ${res.status}`);
+      client.hostIndex = idx;
+      return await res.json();
+    } catch (e) {
+      if (e instanceof GeoBlocked) throw e;
+      lastErr = e;
+    } finally {
+      clearTimeout(t);
+    }
+  }
+  throw new Error(`Sem conexão com a Binance: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function binanceGet(path: string, params: Record<string, string | number>): Promise<any> {
+  if (client.useWsApi) return wsApi(path, params);
+  try {
+    return await restHttp(path, params);
+  } catch (e) {
+    if (e instanceof GeoBlocked) throw e;
+    const res = await wsApi(path, params); // REST indisponível (ex.: bloqueio do navegador): plano B
+    client.useWsApi = true;
+    return res;
+  }
+}
+
 export class BinanceMarket implements MarketData {
   sourceName = "binance";
   isSynthetic = false;
@@ -78,10 +141,8 @@ export class BinanceMarket implements MarketData {
   filters = new Map<string, SymbolFilters>();
   ready = false;
   private ws: WebSocket | null = null;
-  useWsApi = false; // plano B: API WebSocket oficial quando o navegador bloquear o REST
   private stopped = false;
   private backoff = 1;
-  private hostIndex = 0;
   private timers: number[] = [];
   connected = false;
   reconnects = 0;
@@ -102,65 +163,8 @@ export class BinanceMarket implements MarketData {
   getFilters(symbol: string) { return this.filters.get(symbol) ?? null; }
   brlBook() { return this.brlSymbol ? this.getBook(this.brlSymbol) : null; }
 
-  /** Plano B: mesma consulta pela API WebSocket oficial da Binance (não sofre bloqueio de CORS). */
-  private wsApi(path: string, params: Record<string, string | number>): Promise<unknown> {
-    const method = WS_API_METHOD[path];
-    const p: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(params)) p[k] = k === "symbols" ? JSON.parse(String(v)) : v;
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(WS_API_URL);
-      const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      const timer = setTimeout(() => { ws.close(); reject(new Error("tempo esgotado na API WebSocket")); }, 15_000);
-      ws.onopen = () => ws.send(JSON.stringify({ id, method, params: p }));
-      ws.onmessage = (ev) => {
-        const msg = JSON.parse(String(ev.data));
-        if (msg.id !== id) return;
-        clearTimeout(timer);
-        ws.close();
-        if (msg.status === 451) reject(new GeoBlocked("A Binance bloqueou o acesso a partir da sua localização (HTTP 451)."));
-        else if (msg.status === 200) resolve(msg.result);
-        else reject(new Error(msg.error?.msg ?? `API WebSocket respondeu ${msg.status}`));
-      };
-      ws.onerror = () => { clearTimeout(timer); reject(new Error("falha na API WebSocket")); };
-    });
-  }
-
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async rest(path: string, params: Record<string, string | number>): Promise<any> {
-    if (this.useWsApi) return this.wsApi(path, params);
-    try {
-      return await this.restHttp(path, params);
-    } catch (e) {
-      if (e instanceof GeoBlocked) throw e;
-      const res = await this.wsApi(path, params); // REST indisponível (ex.: bloqueio do navegador): usa o plano B
-      this.useWsApi = true;
-      return res;
-    }
-  }
-
-  private async restHttp(path: string, params: Record<string, string | number>) {
-    const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString();
-    let lastErr: unknown = null;
-    for (let attempt = 0; attempt < REST_HOSTS.length; attempt++) {
-      const host = REST_HOSTS[(this.hostIndex + attempt) % REST_HOSTS.length];
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 10_000);
-      try {
-        const res = await fetch(`${host}${path}?${qs}`, { signal: ctrl.signal, cache: "no-store" });
-        if (res.status === 451) throw new GeoBlocked("A Binance bloqueou o acesso a partir da sua localização (HTTP 451).");
-        if (res.status === 429 || res.status === 418) throw new Error(`Limite de requisições da Binance (HTTP ${res.status})`);
-        if (!res.ok) throw new Error(`Binance respondeu HTTP ${res.status}`);
-        this.hostIndex = (this.hostIndex + attempt) % REST_HOSTS.length;
-        return await res.json();
-      } catch (e) {
-        if (e instanceof GeoBlocked) throw e;
-        lastErr = e;
-      } finally {
-        clearTimeout(t);
-      }
-    }
-    throw new Error(`Sem conexão com a Binance: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
-  }
+  private rest(path: string, params: Record<string, string | number>): Promise<any> { return binanceGet(path, params); }
 
   private wanted(): string[] { return [...this.symbols, ...(this.brlSymbol ? [this.brlSymbol] : [])]; }
 
@@ -308,7 +312,7 @@ export class BinanceMarket implements MarketData {
     for (const [s, b] of this.books) ages[s] = Math.round((now - b.ts) * 10) / 10;
     return {
       source: this.sourceName, synthetic: this.isSynthetic, fatal_error: this.fatalError, ready: this.ready, book_age_s: ages,
-      via: this.useWsApi ? "API WebSocket" : "REST",
+      via: client.useWsApi ? "API WebSocket" : "REST",
       websocket: { connected: this.connected, reconnects: this.reconnects, messages: this.messages,
         last_message_age_s: this.lastMessage ? Math.round((now - this.lastMessage) * 10) / 10 : null, last_error: this.lastError },
     };

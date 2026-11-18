@@ -30,7 +30,7 @@ sem servidor e sem mensalidade. Ele analisa o mercado e opera **enquanto o app e
 | Dados ao vivo da Binance com reconexão automática e plano B (API WebSocket) | ✅ (testado sem internet; conexão real será confirmada no seu celular) |
 | App instalável em português, tela sempre ligada enquanto opera | ✅ |
 | Motor do app idêntico ao motor Python de referência (teste de paridade) | ✅ |
-| Backtest com dados históricos reais | ✅ pronto (roda no GitHub Actions) |
+| Backtest com dados históricos reais | ✅ **no próprio app** (Histórico → Backtest): baixa da Binance e roda o mesmo robô |
 | IA (Claude) opcional — só analisa, nunca altera limites | ✅ (chave salva só no aparelho) |
 | Testnet / Real | 🔒 bloqueados |
 

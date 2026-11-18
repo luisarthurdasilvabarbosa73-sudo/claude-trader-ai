@@ -3,6 +3,7 @@
 import { strict as assert } from "node:assert";
 import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
+import { simulate } from "../backtest.ts";
 import { DEFAULT_CONFIG, TradingEngine } from "../engine.ts";
 import { filtersFromExchangeInfo } from "../filters.ts";
 import { MemoryKV, Repo } from "../repo.ts";
@@ -10,6 +11,22 @@ import { ReplayMarket, replayCandle } from "../replay.ts";
 import type { Candle } from "../types.ts";
 
 const FIXTURE = process.env.PARIDADE ?? "/tmp/paridade.json";
+
+test("backtest do app reproduz as operações do motor Python", { skip: !existsSync(FIXTURE) && "fixture ausente" }, async () => {
+  const fx = JSON.parse(readFileSync(FIXTURE, "utf8"));
+  const series: Record<string, Candle[]> = {};
+  for (const [s, rows] of Object.entries(fx.candles as Record<string, number[][]>)) {
+    series[s] = rows.map(([t, o, h, l, c, v]) => ({ openTime: t, open: o, high: h, low: l, close: c, volume: v,
+      closeTime: t + 59_999, quoteVolume: v * c, trades: Math.trunc(v), closed: true }));
+  }
+  const filters = Object.fromEntries(Object.entries(fx.exchange_info).map(([k, v]) => [k, filtersFromExchangeInfo(v)]));
+  const res = await simulate(series, filters, fx.brl_rate, fx.initial_brl, { warmup: fx.warmup, synthetic: true });
+  assert.equal(res.trades.length, fx.trades.length);
+  res.trades.forEach((t, i) => {
+    assert.equal(t.exit_reason, fx.trades[i].exit_reason);
+    assert.ok(Math.abs((t.pnl_quote ?? 0) - fx.trades[i].pnl_quote) < 1e-6);
+  });
+});
 
 test("motor do app decide igual ao motor Python de referência", { skip: !existsSync(FIXTURE) && "fixture ausente" }, () => {
   const fx = JSON.parse(readFileSync(FIXTURE, "utf8"));
